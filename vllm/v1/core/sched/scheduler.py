@@ -377,7 +377,6 @@ class Scheduler(SchedulerInterface):
         # len(self.running).
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) <= len(self.running))
-
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = 0
@@ -469,6 +468,7 @@ class Scheduler(SchedulerInterface):
             req_data.new_token_ids = new_token_ids
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
+            req_data.recent_generated_tokens = request._output_token_ids[-10:] #NOTE(brian1009): Ad-hoc
         else:
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,
