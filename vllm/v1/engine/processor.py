@@ -39,7 +39,8 @@ class Processor:
         self.lora_config = vllm_config.lora_config
         self.decoding_config = vllm_config.decoding_config
         self.tokenizer = tokenizer
-
+        #NOTE(brian1009): Create a list of tokens for each rl4l tag
+        self._convert_rl4l_tags_to_tokens()
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
         self.input_preprocessor = InputPreprocessor(self.model_config,
@@ -50,6 +51,16 @@ class Processor:
         self.use_hash = (
             not self.model_config.disable_mm_preprocessor_cache) or \
             self.cache_config.enable_prefix_caching
+
+    def _convert_rl4l_tags_to_tokens(self):
+        rl4l_tags = self.model_config.rl4l_tags
+        if len(rl4l_tags) == 0:
+            self.rl4l_tags_tokens = []
+            return
+        rl4l_tags_tokens = []
+        for tag in rl4l_tags:
+            rl4l_tags_tokens.append(self.tokenizer.encode(tag))
+        self.rl4l_tags_tokens = rl4l_tags_tokens
 
     def _validate_logprobs(
         self,
@@ -278,6 +289,7 @@ class Processor:
             eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            rl4l_tags_tokens=self.rl4l_tags_tokens,
         )
 
     def _validate_model_inputs(self,

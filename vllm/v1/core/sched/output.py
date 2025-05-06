@@ -62,7 +62,7 @@ class CachedRequestData:
     num_computed_tokens: int
     # NOTE(brian1009):
     recent_generated_tokens: list[int]
-
+    rl4l_tags_tokens: list[list[int]]
     @classmethod
     def from_request(
         cls,
@@ -77,7 +77,8 @@ class CachedRequestData:
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=request.num_computed_tokens,
-            recent_generated_tokens=request._output_token_ids[-10:],
+            recent_generated_tokens=request._output_token_ids[-10:], #NOTE(brian1009): Log the output_token_ids.
+            rl4l_tags_tokens=request.rl4l_tags_tokens,
         )
 
 

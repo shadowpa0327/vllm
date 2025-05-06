@@ -469,6 +469,7 @@ class Scheduler(SchedulerInterface):
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
             req_data.recent_generated_tokens = request._output_token_ids[-10:] #NOTE(brian1009): Ad-hoc
+            req_data.rl4l_tags_tokens = request.rl4l_tags_tokens
         else:
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,

@@ -199,6 +199,7 @@ class ModelConfig:
             "transformers" will use the Transformers model implementation.
         override_generation_config: Override the generation config with the
             given config.
+        rl4l_tags: Optional list of strings for RL4L tags.
     """
 
     def compute_hash(self) -> str:
@@ -266,9 +267,11 @@ class ModelConfig:
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
+        rl4l_tags: Optional[list[str]] = None,
     ) -> None:
         self.model = maybe_model_redirect(model)
         self.tokenizer = maybe_model_redirect(tokenizer)
+        self.rl4l_tags = rl4l_tags
 
         self.hf_config_path = hf_config_path
         if isinstance(hf_config_path, str):

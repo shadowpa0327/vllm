@@ -31,6 +31,7 @@ class Request:
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
+        rl4l_tags_tokens: Optional[list[list[int]]] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
@@ -73,6 +74,9 @@ class Request:
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
 
+        # NOTE(brian1009): Add rl4l tags to the request
+        self.rl4l_tags_tokens = rl4l_tags_tokens
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(
@@ -88,6 +92,7 @@ class Request:
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
+            rl4l_tags_tokens=request.rl4l_tags_tokens,
         )
 
     def append_output_token_ids(

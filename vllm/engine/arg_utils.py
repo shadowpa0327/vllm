@@ -210,6 +210,7 @@ class EngineArgs:
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
     use_tqdm_on_load: bool = True
+    rl4l_tags: Optional[List[str]] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -1001,6 +1002,13 @@ class EngineArgs:
             "Note that even if this is set to False, cascade attention will be "
             "only used when the heuristic tells that it's beneficial.")
 
+        parser.add_argument(
+            '--rl4l-tags',
+            type=str,
+            nargs='+',
+            default=None,
+            help='Optional list of strings for RL4L tags.')
+
         return parser
 
     @classmethod
@@ -1061,6 +1069,7 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
+            rl4l_tags=self.rl4l_tags,
         )
 
     def create_load_config(self) -> LoadConfig:

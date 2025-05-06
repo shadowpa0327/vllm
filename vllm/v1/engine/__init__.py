@@ -59,7 +59,7 @@ class EngineCoreRequest(
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
-
+    rl4l_tags_tokens: Optional[list[list[int]]]
 
 class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""

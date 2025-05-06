@@ -188,7 +188,6 @@ class LLMEngine:
                                                 trace_headers,
                                                 prompt_adapter_request,
                                                 priority)
-
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
