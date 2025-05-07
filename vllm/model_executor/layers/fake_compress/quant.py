@@ -77,7 +77,6 @@ def fake_quantize_weight(
     """
     if n_bits == 16: #Torch.compile is non happy with this line.....
         return w
-    
     original_shape = w.shape
     
     # Handle column-based grouping by transposing if needed

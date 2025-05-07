@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -415,6 +415,16 @@ class Scheduler(SchedulerInterface):
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
+
+        # Determine the model mode based on the scheduled requests  
+        new_rl4l_mode = "default"  # if no new requests, sent out the default signal to deactive the model compression.
+        if not new_reqs_data and (running_reqs_data or resumed_reqs_data):  
+            # Only check for mode switching if we're processing cached requests  
+            for req_data in running_reqs_data + resumed_reqs_data:  
+                if hasattr(req_data, 'new_rl4l_mode'):  
+                    new_rl4l_mode = req_data.new_rl4l_mode  
+                    break  
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
@@ -431,6 +441,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            new_rl4l_mode=new_rl4l_mode,
         )
 
         # Advance the number of computed tokens for the request AFTER
@@ -448,6 +459,17 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids = set()
         return scheduler_output
 
+    def rl4l_pattern_match(self, recent: list[int], patterns: list[list[int]]): #Brian1009: buggy
+        best = None
+        for pid, pat in enumerate(patterns):
+            m = len(pat)
+            if len(recent) < m:
+                continue
+            if recent[-m:] == pat:
+                best = (pid, pat)
+                return best
+        return None
+
     def _make_cached_request_data(
         self,
         request: Request,
@@ -462,6 +484,14 @@ class Scheduler(SchedulerInterface):
         num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
         new_token_ids = request.all_token_ids[
             num_computed_tokens:num_computed_tokens + num_regular_tokens]
+
+        #NOTE(btian1009) Get the most recent tokens (up to 10)  
+        recent_tokens = list(request.output_token_ids[-10:])  
+        
+        # Check for pattern matches  
+        breakpoint()
+        match = self.rl4l_pattern_match(recent_tokens, request.rl4l_tags_tokens)
+        new_rl4l_mode = "no_change" if match is None else str(match[0])
         req_data = self._cached_reqs_data.get(request.request_id)
         if req_data is not None:
             req_data.resumed_from_preemption = resumed_from_preemption
@@ -470,11 +500,13 @@ class Scheduler(SchedulerInterface):
             req_data.num_computed_tokens = num_computed_tokens
             req_data.recent_generated_tokens = request._output_token_ids[-10:] #NOTE(brian1009): Ad-hoc
             req_data.rl4l_tags_tokens = request.rl4l_tags_tokens
+            req_data.new_rl4l_mode = new_rl4l_mode
         else:
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,
                                                       new_token_ids,
-                                                      new_block_ids)
+                                                      new_block_ids,
+                                                      new_rl4l_mode)
             self._cached_reqs_data[request.request_id] = req_data
         return req_data
 

@@ -39,6 +39,8 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    cur_rl4l_modes: str = "default"
+
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
 

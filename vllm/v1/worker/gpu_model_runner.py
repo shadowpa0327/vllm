@@ -3,7 +3,7 @@
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union, List
 
 import numpy as np
 import torch
@@ -19,6 +19,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.quantization.rl4l import FakeCompressedLinearMethod
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
@@ -375,11 +377,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
 
             req_ids_to_add.append(req_id)
-
-        # Update the states of the running/resumed requests.
+        
+        # Update the states of the running/resumed requests. 
         for req_data in scheduler_output.scheduled_cached_reqs:
             req_id = req_data.req_id
             req_state = self.requests[req_id]
+
+            #NOTE(brian1009): Hack.....
+            def last_match(recent: List[int], patterns: List[List[int]]):
+                best = None
+                for pid, pat in enumerate(patterns):
+                    m = len(pat)
+                    # Try every ending position in reverse so we stop at the first (latest) hit
+                    for end in range(len(recent), m-1, -1):
+                        if recent[end-m:end] == pat:
+                            best = (pid, pat)
+                            return best
+                return None
+
+            #NOTE(brian1009): A hacky solution here.... Assuming that the last 10 tokens are enough to determine the rl4l mode
+            rl4l_modes = last_match(req_state.output_token_ids[-10:], req_data.rl4l_tags_tokens)
+            if rl4l_modes is not None:
+                req_state.cur_rl4l_modes = rl4l_modes
 
             # Update the cached states.
             num_computed_tokens = req_data.num_computed_tokens
@@ -476,7 +495,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch, scheduler_output)
         if modified_batch:
             self.input_batch.refresh_sampling_metadata()
-
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
@@ -977,6 +995,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
+        #NOTE(brian1009): Hack.....
+        if len(scheduler_output.scheduled_cached_reqs + scheduler_output.scheduled_new_reqs) > 1:
+            raise ValueError("Only one request is supported for now")
+
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
@@ -988,7 +1010,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             encoder_outputs = self._gather_encoder_outputs(scheduler_output)
         else:
             encoder_outputs = []
-
         # Prepare the decoder inputs.
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
@@ -1046,6 +1067,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
+            #NOTE(brian1009): Hack..... Toggle the model compression mode here.
+            if scheduler_output.new_rl4l_mode != "no_change":
+                print(f"****** Changing RL4L mode to: {scheduler_output.new_rl4l_mode} *********")
+                for name, module in self.model.named_modules():
+                    if isinstance(module, LinearBase):
+                        if isinstance(module.quant_method, FakeCompressedLinearMethod):
+                            print("Handling module: ", name)
+                            module.quant_method.set_fake_compression_mode(scheduler_output.new_rl4l_mode)
+            else:
+                print("******** No change in RL4L mode *********")
+
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1055,7 +1087,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
-
+        
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)

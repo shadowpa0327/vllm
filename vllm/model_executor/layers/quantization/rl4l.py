@@ -1,6 +1,5 @@
 import itertools
-from typing import Any, Optional, List, Dict
-
+from typing import Optional, TYPE_CHECKING, Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,20 +20,21 @@ class FakeCompConfig(QuantizationConfig):
     def __init__(
             self, 
             init_bit_width: int = 16,
-            modules_to_not_convert: Optional[List[str]] = None
+            rl4l_tags: Optional[list[str]] = None,
+            modules_to_not_convert: Optional[list[str]] = None
         ) -> None:
         super().__init__()
         self.bit_width = init_bit_width
         self.modules_to_not_convert = modules_to_not_convert or []
-    
+        self.rl4l_tags = rl4l_tags or []
     def __repr__(self) -> str:
-        return (f"FakeCompConfig(bit_width={self.bit_width})")
+        return (f"FakeCompConfig(bit_width={self.bit_width}, rl4l_tags={self.rl4l_tags})")
 
     @classmethod
     def get_name(cls) -> str:
         return "fake_comp"
         
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.half, torch.float, torch.bfloat16]
 
     @classmethod
@@ -42,31 +42,35 @@ class FakeCompConfig(QuantizationConfig):
         return 75 #NOTE(brian1009): I just randomely put a lower number.
     
     @staticmethod
-    def get_config_filenames() -> List[str]: # NOTE(brian1009): We don't need this, just a placeholder
+    def get_config_filenames() -> list[str]: # NOTE(brian1009): We don't need this, just a placeholder
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "FakeCompConfig":
-        return cls(config.get("bit_width", 16))
+    def from_config(cls, config: dict[str, Any]) -> "FakeCompConfig":
+        return cls(
+            config.get("bit_width", 16),
+            config.get("rl4l_tags", [])
+        )
 
     def get_quant_method(self, layer: torch.nn.Module,
                         prefix: str) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
             if is_layer_skipped_fake_comp(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
-            return FakeCompressedLinearMethod(self.bit_width)
+            return FakeCompressedLinearMethod(self.bit_width, self.rl4l_tags)
         return None
 
-def is_layer_skipped_fake_comp(prefix: str, modules_to_not_convert: List[str]):
+def is_layer_skipped_fake_comp(prefix: str, modules_to_not_convert: list[str]):
     return any(module_name in prefix for module_name in modules_to_not_convert)
 
 class FakeCompressedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
-    def __init__(self, init_bit_width: int = 16):
-        super().__init__()            # base classes don’t define __init__,
+    def __init__(self, init_bit_width: int = 16, rl4l_tags: list[str] = []):
+        super().__init__()            # base classes don't define __init__,
                                       # but the call does no harm and is good practice
         self.bit_width = init_bit_width    # <- remember the target bit-width
+        self.rl4l_tags = rl4l_tags
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -87,6 +91,25 @@ class FakeCompressedLinearMethod(LinearMethodBase):
     def get_bit_width(self):
         return self.bit_width
 
+    def set_fake_compression_mode(self, mode: str):
+        if mode == 'default':
+            self.bit_width = 16
+        elif mode.isdigit():
+            mode_id = int(mode)
+            if mode_id < len(self.rl4l_tags):
+                target_mode = self.rl4l_tags[mode_id]
+                if target_mode == " I'm":
+                    print("Toggling bit width to 8")
+                    self.bit_width = 8
+                elif target_mode == " language":
+                    print("Toggling bit width to 7")
+                    self.bit_width = 7
+            else:
+                raise ValueError(f"Invalid fake compression mode: {mode}")
+        else:
+            raise ValueError(f"Invalid fake compression mode (index): {mode}")
+
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
@@ -105,10 +128,10 @@ class FakeCompressedLinearMethod(LinearMethodBase):
         """
         #logger.warning("Using patched apply")
         # Use the configured bit width from the quant_method
-        bit_width = getattr(self, "bit_width", 16)  # Default to 8 if not set
-        sym = getattr(self, "symmetric", True)  # Default to symmetric quantization
-        group_size = getattr(self, "group_size", 128)  # Default group size
-        clip_ratio = getattr(self, "clip_ratio", 1.0)  # Default clip ratio
+        bit_width = self.bit_width  
+        sym = True  # Default to symmetric quantization
+        group_size = 128  # Default group size
+        clip_ratio = 1.0  # Default clip ratio
         #NOTE(brian1009): We can extend this function to support more fake-compression methods
         w_compressed = fake_quantize_weight(
             layer.weight, 

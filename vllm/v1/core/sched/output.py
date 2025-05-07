@@ -63,6 +63,8 @@ class CachedRequestData:
     # NOTE(brian1009):
     recent_generated_tokens: list[int]
     rl4l_tags_tokens: list[list[int]]
+    new_rl4l_mode: str
+
     @classmethod
     def from_request(
         cls,
@@ -70,6 +72,7 @@ class CachedRequestData:
         resumed_from_preemption: bool,
         new_token_ids: list[int],
         new_block_ids: list[int],
+        new_rl4l_mode: str,
     ) -> CachedRequestData:
         return cls(
             req_id=request.request_id,
@@ -79,6 +82,7 @@ class CachedRequestData:
             num_computed_tokens=request.num_computed_tokens,
             recent_generated_tokens=request._output_token_ids[-10:], #NOTE(brian1009): Log the output_token_ids.
             rl4l_tags_tokens=request.rl4l_tags_tokens,
+            new_rl4l_mode=new_rl4l_mode,
         )
 
 
@@ -125,3 +129,5 @@ class SchedulerOutput:
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
+
+    new_rl4l_mode: Optional[str] = None  # or use an enum for different modes

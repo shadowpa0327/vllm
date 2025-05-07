@@ -441,7 +441,6 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
-
     @property
     def registry(self):
         return ModelRegistry

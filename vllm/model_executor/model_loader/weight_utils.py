@@ -142,7 +142,6 @@ def convert_bin_to_safetensor_file(
 # TODO(woosuk): Move this to other place.
 def get_quant_config(model_config: ModelConfig,
                      load_config: LoadConfig) -> QuantizationConfig:
-
     quant_cls = get_quantization_config(model_config.quantization)
 
     # GGUF doesn't have config file
@@ -192,7 +191,10 @@ def get_quant_config(model_config: ModelConfig,
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
-        return quant_cls()
+        if model_config.quantization == "fake_comp":
+            return quant_cls(rl4l_tags=model_config.rl4l_tags) # NOTE(brian1009): Special handle to pass rl4l_tags to the quant_cls
+        else:
+            return quant_cls()
 
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
