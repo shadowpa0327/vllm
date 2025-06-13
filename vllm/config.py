@@ -2261,7 +2261,7 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
-                            "draft_model", "deepseek_mtp"]
+                            "draft_model", "deepseek_mtp", "self_specs"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -2441,6 +2441,8 @@ class SpeculativeConfig:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "self_specs":
+                self.model = None
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
@@ -2482,6 +2484,9 @@ class SpeculativeConfig:
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
             # draft related config as None here.
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+        elif self.method == "self_specs":
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         else:
@@ -2754,6 +2759,9 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "deepseek_mtp")
+
+    def use_self_specs(self) -> bool:
+        return self.method == "self_specs"
 
     def __repr__(self) -> str:
         method = self.method

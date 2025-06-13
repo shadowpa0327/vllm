@@ -222,11 +222,21 @@ class EngineCore:
                 outputs=[],
                 scheduler_stats=self.scheduler.make_stats(),
             )
+        print("Start Schedule")
+        #breakpoint()
         scheduler_output = self.scheduler.schedule()
+        print("Start Execute Model")
+        #print(scheduler_output)
+        #breakpoint()
         model_output = self.execute_model(scheduler_output)
+        print("Start Update from Output")
+        #breakpoint()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
-
+        print("Finished Update from Output")
+        if engine_core_outputs.scheduler_stats.spec_decoding_stats is not None:
+            print(engine_core_outputs.scheduler_stats.spec_decoding_stats)
+        #print(engine_core_outputs)
         return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:

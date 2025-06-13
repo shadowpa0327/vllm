@@ -596,7 +596,6 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.cascade_wrapper is not None
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
             return output
-
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 

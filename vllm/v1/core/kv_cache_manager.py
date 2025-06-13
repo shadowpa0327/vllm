@@ -213,6 +213,7 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
+        #breakpoint()
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
 
@@ -260,7 +261,6 @@ class KVCacheManager:
         # avoid the case where the new blocks cannot be allocated.
         self.single_type_manager.save_new_computed_blocks(
             request.request_id, new_computed_block_list)
-
         new_blocks = self.single_type_manager.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
 
@@ -269,6 +269,7 @@ class KVCacheManager:
         if not self.enable_caching or delay_cache_blocks:
             return KVCacheBlocks(new_blocks)
 
+        #FIXME(brian1009): Check prefix caching support....
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.

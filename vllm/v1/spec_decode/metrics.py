@@ -129,6 +129,7 @@ class SpecDecodingProm:
         labelvalues: list[str],
     ):
         self.spec_decoding_enabled = speculative_config is not None
+        #self.spec_decoding_enabled = True #NOTE(brian1009): For testing.
         if not self.spec_decoding_enabled:
             return
 
@@ -148,7 +149,7 @@ class SpecDecodingProm:
                 documentation="Number of accepted tokens.",
                 labelnames=labelnames).labels(*labelvalues)
 
-        assert speculative_config is not None
+        #assert speculative_config is not None
         num_spec_tokens = (speculative_config.num_speculative_tokens
                            if self.spec_decoding_enabled else 0)
         pos_labelnames = labelnames + ["position"]

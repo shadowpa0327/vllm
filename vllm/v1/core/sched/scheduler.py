@@ -27,7 +27,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, SelfSpecState
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -68,6 +68,10 @@ class Scheduler(SchedulerInterface):
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events)
+
+        # Self-speculative decoding threshold
+        self.self_spec_threshold = 3
+        #self.scheduler_config.self_spec_threshold
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -130,12 +134,16 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
 
         self.use_eagle = False
-        self.num_spec_tokens = self.num_lookahead_tokens = 0
+        self.use_self_specs = False
+        self.num_spec_tokens = self.num_lookahead_tokens = self.self_spec_threshold = 0
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+            elif speculative_config.use_self_specs():
+                self.self_spec_threshold = self.num_spec_tokens
+                self.use_self_specs = True
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -147,6 +155,12 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+
+    def should_start_self_spec_verification(self, request: Request) -> bool:
+        """Check if a request should start verification based on scheduler's threshold"""
+        assert self.use_self_specs
+        return (request.self_spec_state == SelfSpecState.ACCUMULATING and 
+                len(request._pending_output_tokens) >= self.self_spec_threshold)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -189,54 +203,77 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-
-            num_new_tokens = (request.num_tokens_with_spec -
-                              request.num_computed_tokens)
-            if (0 < self.scheduler_config.long_prefill_token_threshold <
-                    num_new_tokens):
-                num_new_tokens = (
-                    self.scheduler_config.long_prefill_token_threshold)
-            num_new_tokens = min(num_new_tokens, token_budget)
-
-            # Make sure the input position does not exceed the max model len.
-            # This is necessary when using spec decoding.
-            num_new_tokens = min(
-                num_new_tokens,
-                self.max_model_len - request.num_computed_tokens)
-
-            # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
-            new_encoder_budget = encoder_budget
-            if request.has_encoder_inputs:
-                (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
-                     request, request.num_computed_tokens, num_new_tokens,
-                     encoder_budget)
+            # NOTE(brian1009): Check if request should start verification (reuse spec decoding interface)
+            if self.use_self_specs and self.should_start_self_spec_verification(request):
+                print(f"Found Request:{request.request_id} that should start verification !")
+                # NOTE(brian1009): Adjust num_computed_tokens to exclude pending tokens
+                # The scheduler has been incrementing num_computed_tokens for pending tokens,
+                # but when we move them to spec_token_ids for verification, they should be
+                # considered "uncomputed" so the scheduler will schedule them for verification
+                num_scheduled_pending_output_tokens = request.num_tokens - request.num_computed_tokens
+                request.num_computed_tokens += (num_scheduled_pending_output_tokens - len(request._pending_output_tokens))
+                request.num_computed_tokens -= 1 # NOTE(brian1009) Fall back one token. 
+                # Transition to verification state and get tokens to verify
+                tokens_to_verify = request.start_self_spec_verification()
+                # Reuse the existing spec decoding interface
+                request.spec_token_ids = tokens_to_verify
+                num_new_tokens = len(tokens_to_verify)+1
+                num_draft_tokens = len(tokens_to_verify)
+            else:
+                #NOTE(This part handled the partial prefill scheduling)
+                num_new_tokens = (request.num_tokens_with_spec -
+                                request.num_computed_tokens)
+                if (0 < self.scheduler_config.long_prefill_token_threshold <
+                        num_new_tokens):
+                    num_new_tokens = (
+                        self.scheduler_config.long_prefill_token_threshold)
+                num_new_tokens = min(num_new_tokens, token_budget)
 
-            if num_new_tokens == 0:
-                # The request cannot be scheduled because one of the following
-                # reasons:
-                # 1. No new tokens to schedule. This may happen when PP>1 and
-                #    we have already scheduled all prompt tokens but they are
-                #    not finished yet.
-                # 2. The encoder budget is exhausted.
-                # 3. The encoder cache is exhausted.
-                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
-                # we do not strictly follow the FCFS scheduling policy and
-                # allow the lower-priority requests to be scheduled.
-                req_index += 1
-                continue
+                # Make sure the input position does not exceed the max model len.
+                # This is necessary when using spec decoding.
+                num_new_tokens = min(
+                    num_new_tokens,
+                    self.max_model_len - request.num_computed_tokens)
 
-            num_draft_tokens = max(
-                num_new_tokens + request.num_computed_tokens -
-                request.num_tokens, 0)
+                # Schedule encoder inputs.
+                new_encoder_budget = encoder_budget
+                if request.has_encoder_inputs:
+                    (encoder_inputs_to_schedule, num_new_tokens,
+                    new_encoder_budget) = self._try_schedule_encoder_inputs(
+                        request, request.num_computed_tokens, num_new_tokens,
+                        encoder_budget)
+
+                if num_new_tokens == 0:
+                    # The request cannot be scheduled because one of the following
+                    # reasons:
+                    # 1. No new tokens to schedule. This may happen when PP>1 and
+                    #    we have already scheduled all prompt tokens but they are
+                    #    not finished yet.
+                    # 2. The encoder budget is exhausted.
+                    # 3. The encoder cache is exhausted.
+                    # NOTE(woosuk): Here, by doing `continue` instead of `break`,
+                    # we do not strictly follow the FCFS scheduling policy and
+                    # allow the lower-priority requests to be scheduled.
+                    req_index += 1
+                    continue
+
+                num_draft_tokens = max(
+                    num_new_tokens + request.num_computed_tokens -
+                    request.num_tokens, 0)
 
             while True:
+                print("Request:", request.request_id)
+                print("num_new_tokens:", num_new_tokens)
+                print("num_draft_tokens:", num_draft_tokens)
+                print("Self Spec State:", request.self_spec_state)
+                #print("Allocated KV_ids:", self.kv_cache_manager.get_block_ids(request.request_id))
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
                     num_draft_tokens=num_draft_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
+                #print("New Blocks:", new_blocks)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -587,8 +624,19 @@ class Scheduler(SchedulerInterface):
         # them at each scheduling step.
         num_computed_tokens = request.num_computed_tokens
         num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
-        new_token_ids = request.all_token_ids[
-            num_computed_tokens:num_computed_tokens + num_regular_tokens]
+        
+        # Handle temporary tokens during self-spec mode
+        if request.is_in_self_spec_mode and num_regular_tokens > 0:
+            # During self-spec mode, new tokens might be in pending buffer
+            # We need to get them from the combined view
+            # Access the underlying list since all_token_ids is a ConstantList
+            all_tokens_with_pending = request._all_token_ids + request.get_pending_tokens()
+            new_token_ids = all_tokens_with_pending[
+                num_computed_tokens:num_computed_tokens + num_regular_tokens]
+        else:
+            # Normal case: extract from all_token_ids (can use the ConstantList here)
+            new_token_ids = request.all_token_ids[
+                num_computed_tokens:num_computed_tokens + num_regular_tokens]
 
         req_data_queue = self._cached_reqs_data.get(request.request_id)
         if req_data_queue:
@@ -597,6 +645,8 @@ class Scheduler(SchedulerInterface):
             req_data.new_token_ids = new_token_ids
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
+            req_data.self_spec_state = request.self_spec_state
+            req_data.pending_output_tokens = request.get_pending_tokens()
         else:
             # No cached request data, or all cached request data has been
             # used by the scheduled requests.
@@ -695,7 +745,7 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
         sampled_token_ids = model_runner_output.sampled_token_ids
-        spec_token_ids = model_runner_output.spec_token_ids
+        spec_token_ids = model_runner_output.spec_token_ids #NOTE(brian1009): Comment this for now.
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -717,10 +767,12 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-
+            
+            # Check for any spec decoding (regular or self-spec verification)
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
+                # This handles both regular spec decoding AND self-spec verification
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -730,6 +782,14 @@ class Scheduler(SchedulerInterface):
                 num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
                                        len(generated_token_ids))
                 request.num_computed_tokens -= num_tokens_rejected
+                
+                # Finishing Verification, reset the self-spec state to normal.
+                if self.use_self_specs and request.self_spec_state == SelfSpecState.VERIFYING:
+                    # Flush the processed spec_token_ids
+                    request.spec_token_ids = []
+                    request.self_spec_state = SelfSpecState.NORMAL
+                
+                # Update spec decoding stats (unified for both types)
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=len(scheduled_spec_token_ids),
@@ -753,16 +813,29 @@ class Scheduler(SchedulerInterface):
             new_logprobs = None
             new_token_ids = generated_token_ids
             kv_transfer_params = None
+            flip_from_normal_to_accumulating = False
 
             # Append generated tokens and check for stop. Note that if
             # a request is still being prefilled, we expect the model runner
             # to return empty token ids for the request.
             for num_new, output_token_id in enumerate(new_token_ids, 1):
-                request.append_output_token_ids(output_token_id)
+                #NOTE(brian1009): If the request is speculating, we append the token to the spec_token_ids.
+                # NOTE: Token handling is now done in the self-spec state machine above
+                # We only append to output_token_ids for regular non-self-spec requests
+                if request.self_spec_state == SelfSpecState.ACCUMULATING:
+                    request.add_pending_token(output_token_id)
+                elif request.self_spec_state == SelfSpecState.NORMAL:
+                    request.append_output_token_ids(output_token_id)
+                    stopped = check_stop(request, self.max_model_len)
+                    #NOTE(brian1009): Is self_specs is disabled, 
+                    # we should not flip the state. Always keep the state as NORMAL.
+                    if self.use_self_specs:
+                        flip_from_normal_to_accumulating = True                    
+                else:
+                    raise ValueError(f"During update_from_output, the request is in an invalid state: {request.self_spec_state}. Should be either ACCUMULATING or NORMAL.")
 
                 # Check for stop and update request state.
                 # This must be called before we make the EngineCoreOutput.
-                stopped = check_stop(request, self.max_model_len)
                 if stopped:
                     kv_transfer_params = self._free_request(request)
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
@@ -782,25 +855,34 @@ class Scheduler(SchedulerInterface):
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
 
+            #NOTE(brian1009): Comment this for now.
             # Add newly generated spec token ids to the request.
-            if spec_token_ids is not None:
-                if self.structured_output_manager.should_advance(request):
-                    metadata = request.structured_output_request
-                    # Needs to happen after new_token_ids are accepted.
-                    request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                        spec_token_ids[req_index])
-                else:
-                    request.spec_token_ids = spec_token_ids[req_index]
+            # if spec_token_ids is not None:
+            #     if self.structured_output_manager.should_advance(request):
+            #         metadata = request.structured_output_request
+            #         # Needs to happen after new_token_ids are accepted.
+            #         request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
+            #             spec_token_ids[req_index])
+            #     else:
+            #         request.spec_token_ids = spec_token_ids[req_index]
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or kv_transfer_params:
+            #NOTE(brian1009): If the request is speculating, we do not add the EngineCoreOutput.
+            # We will add the EngineCoreOutput when the request is no longer speculating.
+            
+            # Only generate EngineCoreOutput when we have committed tokens or other outputs
+            if request.self_spec_state == SelfSpecState.ACCUMULATING:
+                output_token_ids = []
+            else:
+                output_token_ids = new_token_ids
 
+            if output_token_ids or kv_transfer_params:
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
                     EngineCoreOutput(
                         request_id=req_id,
-                        new_token_ids=new_token_ids,
+                        new_token_ids=output_token_ids,
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
@@ -809,10 +891,12 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         num_cached_tokens=request.num_cached_tokens,
                     ))
-
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
+            if flip_from_normal_to_accumulating:
+                request.self_spec_state = SelfSpecState.ACCUMULATING
 
             if not stopped:
                 new_running.append(request)

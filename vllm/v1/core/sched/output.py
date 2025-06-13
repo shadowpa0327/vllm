@@ -87,6 +87,10 @@ class CachedRequestData:
     new_token_ids: list[int]
     new_block_ids: list[list[int]]
     num_computed_tokens: int
+    
+    # Self-speculative decoding state (simple copying approach)
+    pending_output_tokens: list[int] = None
+    self_spec_state: str = "normal"
 
     @classmethod
     def from_request(
@@ -102,6 +106,8 @@ class CachedRequestData:
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=request.num_computed_tokens,
+            pending_output_tokens=request.get_pending_tokens(),
+            self_spec_state=request.self_spec_state.value,
         )
 
 

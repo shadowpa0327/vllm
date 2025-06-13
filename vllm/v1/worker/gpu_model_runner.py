@@ -167,6 +167,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.drafter = MedusaProposer(
                         vllm_config=self.vllm_config,
                         device=self.device)  # type: ignore
+                elif self.speculative_config.method == "self_specs":
+                    pass
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -425,6 +427,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the cached states.
             num_computed_tokens = req_data.num_computed_tokens
             req_state.num_computed_tokens = num_computed_tokens
+            
+            # Sync self-spec state from scheduler (simple copying approach)
+            if hasattr(req_data, 'pending_output_tokens') and req_data.pending_output_tokens is not None:
+                req_state.pending_output_tokens = req_data.pending_output_tokens.copy()
+            if hasattr(req_data, 'self_spec_state'):
+                req_state.self_spec_state = req_data.self_spec_state
+            
             # Add the sampled token(s) from the previous step (if any).
             # This doesn't include "unverified" tokens like spec decode tokens.
             num_new_tokens = (num_computed_tokens +
@@ -436,6 +445,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             elif num_new_tokens > 0:
                 req_state.output_token_ids.extend(
                     req_data.new_token_ids[-num_new_tokens:])
+            
             # Update the block IDs.
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
@@ -512,10 +522,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit(num_reqs)
+        self.input_batch.block_table.commit(num_reqs) # NOTE(brian1009) Setup up block table (Req --> KV_Block mapping)
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
@@ -540,7 +549,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
-        # Get positions.
+        # Get positions. NOTE (brian1009): This part compute positions ids
         positions_np = self.positions_np[:total_num_scheduled_tokens]
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
@@ -1114,7 +1123,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
-
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
@@ -1124,8 +1132,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
+        #print("Start Prepare Inputs")
+        # TODO: customized metadata
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
+        #print("Prepare Inputs Done")
+        ##breakpoint()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1321,6 +1333,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.use_spec_decode:
             # Speculative decoding is not enabled.
             spec_token_ids = None
+        elif self.speculative_config.method == "self_specs":
+            spec_token_ids = None
         elif self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.generate_draft_token_ids(
@@ -1427,11 +1441,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
-
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
+        
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
