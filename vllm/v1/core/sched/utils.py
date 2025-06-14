@@ -9,6 +9,9 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         return True
 
     sampling_params = request.sampling_params
+    if len(request.output_token_ids) == 0:
+        return False
+    
     last_token_id = request.output_token_ids[-1]
     if (not sampling_params.ignore_eos
             and last_token_id == request.eos_token_id):

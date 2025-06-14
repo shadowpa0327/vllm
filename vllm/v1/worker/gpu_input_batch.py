@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Datastructures defining an input batch
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, cast
 
 import numpy as np
@@ -32,6 +32,10 @@ class CachedRequestState:
     block_ids: list[list[int]]
     num_computed_tokens: int
     output_token_ids: list[int]
+    
+    # Self-speculative decoding fields (simple copying approach)
+    pending_output_tokens: list[int] = field(default_factory=list)
+    self_spec_state: str = "normal"
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None

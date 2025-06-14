@@ -15,6 +15,13 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
 
 
+class SelfSpecState(enum.Enum):
+    """State for self-speculative decoding"""
+    NORMAL = "normal"  # Regular token generation
+    ACCUMULATING = "accumulating"  # Collecting tokens for verification
+    VERIFYING = "verifying"  # Verifying accumulated tokens
+
+
 class Request:
 
     def __init__(
@@ -48,9 +55,14 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
-        self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = self.prompt_token_ids.copy()
+        self._output_token_ids: list[int] = []  # Final committed output tokens
+        self._all_token_ids: list[int] = self.prompt_token_ids.copy()  # Prompt + committed tokens
         self.spec_token_ids: list[int] = []
+        
+        # Self-speculative decoding state and buffers
+        self.self_spec_state = SelfSpecState.NORMAL
+        self._pending_output_tokens: list[int] = []  # Tokens waiting for verification
+        
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
 
@@ -80,6 +92,35 @@ class Request:
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
+
+        self.spec_token_buffer: list[int] = []  # Buffer for speculative tokens
+
+    # Self-speculative decoding methods
+    def add_pending_token(self, token_id: int) -> None:
+        # NOTE(brian1009) We only maintain the pending_output_tokens buffer in the accumulating state
+        assert self.self_spec_state == SelfSpecState.ACCUMULATING 
+        """Add a token to the pending verification buffer"""
+        self._pending_output_tokens.append(token_id)
+    
+    def start_self_spec_verification(self) -> list[int]:
+        """Start verification and return tokens to verify"""
+        assert self.self_spec_state == SelfSpecState.ACCUMULATING
+        self.self_spec_state = SelfSpecState.VERIFYING
+        # Move pending tokens to spec_token_ids for verification
+        self.spec_token_ids = self._pending_output_tokens.copy()
+        # Clear pending tokens
+        self._pending_output_tokens.clear()
+        return self.spec_token_ids
+    
+    
+    def get_pending_tokens(self) -> list[int]:
+        """Get current pending tokens"""
+        return self._pending_output_tokens.copy()
+
+    @property
+    def is_in_self_spec_mode(self) -> bool:
+        """Check if request is in any self-spec state"""
+        return self.self_spec_state != SelfSpecState.NORMAL
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -114,14 +155,30 @@ class Request:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
 
+    def append_spec_token_ids(
+        self,
+        token_ids: Union[int, list[int]],
+    ) -> None:
+        if isinstance(token_ids, int):
+            self.spec_token_ids.append(token_ids)
+    
     @property
     def num_tokens(self) -> int:
-        return len(self._all_token_ids)
-
+        """Total tokens including pending (for scheduling)"""
+        return len(self._all_token_ids) + len(self._pending_output_tokens)
+    
     @property
     def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + len(self.spec_token_ids)
-
+        """Include both spec tokens and pending tokens"""
+        if self.self_spec_state == SelfSpecState.VERIFYING:
+            # During verification, spec_token_ids contains the tokens being verified
+            return len(self._all_token_ids) + len(self.spec_token_ids)
+        else:
+            # Normal case: include regular spec tokens and pending self-spec tokens
+            return (len(self._all_token_ids) + 
+                    len(self.spec_token_ids) + 
+                    len(self._pending_output_tokens))
+        
     @property
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
