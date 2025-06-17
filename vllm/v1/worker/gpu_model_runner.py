@@ -652,7 +652,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     kv_cache_group_spec.kv_cache_spec,
                     self.attn_metadata_builders[kv_cache_group_id],
                 )
-
+            #NOTE(brian1009): We need to hack here.....
             attn_metadata_i = (
                 self.attn_metadata_builders[kv_cache_group_id].build(
                     num_reqs=num_reqs,
@@ -1132,12 +1132,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
-        #print("Start Prepare Inputs")
+        print("Start Prepare Inputs")
+        breakpoint()
         # TODO: customized metadata
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
-        #print("Prepare Inputs Done")
-        ##breakpoint()
+        print("Prepare Inputs Done")
+        breakpoint()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
