@@ -133,6 +133,16 @@ class SchedulerOutput:
     # If a request does not have any spec decode tokens, it will not be
     # included in the dictionary.
     scheduled_spec_decode_tokens: dict[str, list[int]]
+    # Sparse Attention related.
+    # req_id -> list of selected KV indices.
+    # If a requests is computing with sparse attention, it will be included
+    # in the dictionary.
+    sparse_selected_kv_indices_of_scheduled_reqs: dict[str, list[int]]
+    # req_id -> full_kv_start_offset
+    # The offset point where full KV caching starts for all subsequent tokens
+    # {'req_id': full_kv_start_offset}, if a request is computing with full KV caching, 
+    # it will -1
+    full_kv_start_offset: dict[str, int]
     # req_id -> encoder input indices that need processing.
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
@@ -157,3 +167,4 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+

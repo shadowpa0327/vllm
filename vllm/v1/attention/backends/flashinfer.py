@@ -17,7 +17,7 @@ from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata, concat_kv_indices_kernel)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -413,7 +413,6 @@ class FlashInferMetadataBuilder:
             self.runner.device, non_blocking=True).long()
 
         block_table_bounds = (seq_lens + page_size - 1) // page_size
-
         use_cascade = common_prefix_len > 0
         if use_cascade:
             # Grab the blocks of the shared prefix from the first request.
@@ -439,6 +438,7 @@ class FlashInferMetadataBuilder:
             shared_kv_page_indices = None
             shared_kv_last_page_len = None
 
+        #Hack here....
         mask = (torch.arange(block_table_tensor.size(1),
                              dtype=block_table_tensor.dtype,
                              device=block_table_tensor.device).unsqueeze(0)
@@ -451,6 +451,124 @@ class FlashInferMetadataBuilder:
                         device=block_table_bounds.device),
             block_table_bounds.cumsum(dim=0, dtype=torch.int32)
         ])
+        paged_kv_last_page_len = seq_lens % page_size
+        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+                                             page_size, paged_kv_last_page_len)
+
+        attn_metadata = FlashInferMetadata(
+            num_actual_tokens=num_actual_tokens,
+            qo_indptr=qo_indptr,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=self.runner.num_query_heads,
+            num_kv_heads=self.kv_cache_spec.num_kv_heads,
+            head_dim=self.kv_cache_spec.head_size,
+            page_size=page_size,
+            data_type=self.kv_cache_spec.dtype,
+            q_data_type=self.runner.dtype,
+            slot_mapping=slot_mapping,
+            num_decodes=self._num_decodes,
+            num_decode_tokens=self._num_decode_tokens,
+            num_prefills=self._num_prefills,
+            num_prefill_tokens=self._num_prefill_tokens,
+            use_cascade=use_cascade,
+            shared_qo_indptr=shared_qo_indptr,
+            shared_kv_page_indptr=shared_kv_page_indptr,
+            shared_kv_page_indices=shared_kv_page_indices,
+            shared_kv_last_page_len=shared_kv_last_page_len,
+        )
+
+        self._plan(attn_metadata)
+
+        return attn_metadata
+
+    def build_with_selective_kv(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+                               common_prefix_len: int,
+                               common_attn_metadata: CommonAttentionMetadata):
+        """
+        Build FlashInferMetadata with selective KV caching support.
+        
+        This method implements the selective KV concatenation logic:
+        For each request: [selective_kv_indices] + [new_kv_indices]
+        """
+        assert self._num_decodes + self._num_prefills == num_reqs
+        assert (self._num_decode_tokens +
+                self._num_prefill_tokens == num_actual_tokens)
+        page_size = self.kv_cache_spec.block_size
+        assert page_size == 1, "page_size must be 1 for selective KV caching"
+        device = self.runner.device
+        qo_indptr = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        block_table_tensor = self.block_table.get_device_tensor()[:num_reqs]
+        slot_mapping = self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
+            self.runner.device, non_blocking=True).long()
+
+        block_table_bounds = (seq_lens + page_size - 1) // page_size
+        use_cascade = False
+        shared_qo_indptr = None
+        shared_kv_page_indptr = None
+        shared_kv_page_indices = None
+        shared_kv_last_page_len = None
+
+        #Hack here....
+        mask = (torch.arange(block_table_tensor.size(1),
+                             dtype=block_table_tensor.dtype,
+                             device=block_table_tensor.device).unsqueeze(0)
+                < block_table_bounds.unsqueeze(1))
+        all_kv_indices = block_table_tensor[mask]
+        # Extract the number of selective KV indices for each request
+        len_selected_kv_indices = self.runner.input_batch.num_selective_kv_indices_cpu_tensor[:num_reqs]
+        len_selected_kv_indices_tensor = len_selected_kv_indices.to(
+            device=device, dtype=torch.int32, non_blocking=True)
+        
+        selected_kv_indices = self.runner.input_batch.selective_kv_indices_cpu_tensor[:num_reqs]
+        selected_kv_indices_tensor = selected_kv_indices.to(
+            device=device, dtype=torch.int32, non_blocking=True)
+
+        full_kv_start_offset = self.runner.input_batch.full_kv_start_offset_cpu_tensor[:num_reqs]
+        full_kv_start_offset_tensor = full_kv_start_offset.to(
+            device=device, dtype=torch.int32, non_blocking=True)
+
+        full_kv_seq_len_cumsum = torch.cat([
+            torch.zeros(1, 
+                        dtype=block_table_bounds.dtype, 
+                        device=block_table_bounds.device), 
+            block_table_bounds.cumsum(dim=0, dtype=torch.int32)
+        ])
+        len_all_kv_indices = block_table_bounds - full_kv_start_offset_tensor
+        full_kv_start_offset_tensor = full_kv_start_offset_tensor + full_kv_seq_len_cumsum[:-1]
+        paged_kv_indptr = torch.cat([
+            torch.zeros(1,
+                        dtype=block_table_bounds.dtype,
+                        device=block_table_bounds.device),
+            (len_all_kv_indices + len_selected_kv_indices_tensor).cumsum(dim=0, dtype=torch.int32)
+        ])
+        
+        total_output_size = paged_kv_indptr[-1].item()  # 66
+        paged_kv_indices = torch.zeros(total_output_size, dtype=torch.int32, device=device)
+        grid = (32,)
+        concat_kv_indices_kernel[grid](
+            selected_kv_indices_tensor,
+            selected_kv_indices_tensor.stride(0),
+            len_selected_kv_indices_tensor,
+            all_kv_indices,
+            full_kv_start_offset_tensor,
+            len_all_kv_indices,
+            paged_kv_indices,
+            paged_kv_indptr,
+            num_reqs,
+            BLOCK_SIZE=128,
+        )
+        # print(f"len_selected_kv_indices: {len_selected_kv_indices_tensor}")
+        # print(f"len_all_kv_indices: {len_all_kv_indices}")
+        # print(f"full_kv_start_offset: {full_kv_start_offset_tensor}")
+        # print(f"full_kv_seq_len_cumsum: {full_kv_seq_len_cumsum}")
+        # print(f"block_table_bounds: {block_table_bounds}")
+        # print(f"all_kv_indices: {all_kv_indices}")
+        # print(f"paged_kv_indptr: {paged_kv_indptr}")
+        # print(f"selected_kv_indices: {selected_kv_indices_tensor}")
+        # print(f"paged_kv_indices: {paged_kv_indices}")
 
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,

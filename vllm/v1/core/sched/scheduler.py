@@ -69,10 +69,6 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events)
 
-        # Self-speculative decoding threshold
-        self.self_spec_threshold = 3
-        #self.scheduler_config.self_spec_threshold
-
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
@@ -91,6 +87,7 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+
         # Priority queues for requests.
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
@@ -136,6 +133,8 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.use_self_specs = False
         self.num_spec_tokens = self.num_lookahead_tokens = self.self_spec_threshold = 0
+
+        self.sink_size = self.recnet_size = -1 # For Sparse Attention
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
@@ -144,6 +143,18 @@ class Scheduler(SchedulerInterface):
             elif speculative_config.use_self_specs():
                 self.self_spec_threshold = self.num_spec_tokens
                 self.use_self_specs = True
+                # FIXME(brian1009): Hardcoded for sparse attn.
+                self.recnet_size = 60
+                self.sink_size = 4
+
+        # NOTE(brian1009): Selective KV Indices for sparse attention for each request
+        # We expected this maintain the logical KV indices for each request
+        # This is used to generate the attn_metadata for the sparse attention
+        # backend.
+        # req_id -> selected_kv_indices
+        self.req_to_sparse_selected_kv_indices: dict[str, list[int]] = {}
+        # req_id -> full_kv_start_offset
+        self.req_to_full_kv_start_offset: dict[str, int] = {}
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -196,6 +207,9 @@ class Scheduler(SchedulerInterface):
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
+        # Sparse Attention related.
+        sparse_selected_kv_indices_of_scheduled_reqs: dict[str, list[int]] = {}
+        full_kv_start_offset_of_scheduled_reqs: dict[str, int] = {}
         # For logging.
         scheduled_timestamp = time.monotonic()
 
@@ -216,6 +230,9 @@ class Scheduler(SchedulerInterface):
                 request.num_computed_tokens -= 1 # NOTE(brian1009) Fall back one token. 
                 # Transition to verification state and get tokens to verify
                 tokens_to_verify = request.start_self_spec_verification()
+                # During the verification, we use full KV indices. Hence, we cleanup the sparse_selected_kv_indices
+                self.req_to_sparse_selected_kv_indices[request.request_id] = []
+                self.req_to_full_kv_start_offset[request.request_id] = 0
                 # Reuse the existing spec decoding interface
                 request.spec_token_ids = tokens_to_verify
                 num_new_tokens = len(tokens_to_verify)+1
@@ -273,8 +290,8 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens,
                     num_draft_tokens=num_draft_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
-                #print("New Blocks:", new_blocks)
                 if new_blocks is None:
+                    #breakpoint()
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
@@ -323,6 +340,13 @@ class Scheduler(SchedulerInterface):
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
                         request.spec_token_ids)
+            
+            # Sparse Attention related.
+            if request.self_spec_state == SelfSpecState.ACCUMULATING:
+                sparse_selected_kv_indices_of_scheduled_reqs[request.request_id] = (
+                    self.req_to_sparse_selected_kv_indices[request.request_id])
+                full_kv_start_offset_of_scheduled_reqs[request.request_id] = (
+                    self.req_to_full_kv_start_offset[request.request_id])
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -572,6 +596,8 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            sparse_selected_kv_indices_of_scheduled_reqs=sparse_selected_kv_indices_of_scheduled_reqs,
+            full_kv_start_offset=full_kv_start_offset_of_scheduled_reqs,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
             # finished_req_ids is an existing state in the scheduler,
@@ -782,7 +808,8 @@ class Scheduler(SchedulerInterface):
                 num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
                                        len(generated_token_ids))
                 request.num_computed_tokens -= num_tokens_rejected
-                
+                # print("Processed rejected tokens: ", num_tokens_rejected)
+                # breakpoint()
                 # Finishing Verification, reset the self-spec state to normal.
                 if self.use_self_specs and request.self_spec_state == SelfSpecState.VERIFYING:
                     # Flush the processed spec_token_ids
@@ -814,7 +841,10 @@ class Scheduler(SchedulerInterface):
             new_token_ids = generated_token_ids
             kv_transfer_params = None
             flip_from_normal_to_accumulating = False
-
+            # if len(generated_token_ids) == 0:
+            #     print("Generated token ids is empty")
+            #     breakpoint()
+            
             # Append generated tokens and check for stop. Note that if
             # a request is still being prefilled, we expect the model runner
             # to return empty token ids for the request.
@@ -830,7 +860,7 @@ class Scheduler(SchedulerInterface):
                     #NOTE(brian1009): Is self_specs is disabled, 
                     # we should not flip the state. Always keep the state as NORMAL.
                     if self.use_self_specs:
-                        flip_from_normal_to_accumulating = True                    
+                        flip_from_normal_to_accumulating = True
                 else:
                     raise ValueError(f"During update_from_output, the request is in an invalid state: {request.self_spec_state}. Should be either ACCUMULATING or NORMAL.")
 
@@ -841,6 +871,18 @@ class Scheduler(SchedulerInterface):
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
                     break
 
+            #Update Sparse Attention KV Indices
+            #NOTE(brian1009): Double check whether [0] is correct.
+            if not stopped and request.self_spec_state == SelfSpecState.NORMAL and flip_from_normal_to_accumulating:
+                all_kv_indices = self.kv_cache_manager.get_block_ids(request.request_id)[0][:request.num_computed_tokens]
+                # Handle overlapping case when recent_size is too large
+                if self.sink_size + self.recnet_size >= len(all_kv_indices):
+                    selective_kv_indices = all_kv_indices
+                else:
+                    selective_kv_indices = all_kv_indices[:self.sink_size] + all_kv_indices[-self.recnet_size:]
+                self.req_to_sparse_selected_kv_indices[req_id] = selective_kv_indices
+                self.req_to_full_kv_start_offset[req_id] = request.num_computed_tokens
+            
             # Extract sample logprobs if needed.
             if request.sampling_params.logprobs is not None and logprobs:
                 # NOTE: once we support N tokens per step (spec decode),
@@ -897,7 +939,8 @@ class Scheduler(SchedulerInterface):
 
             if flip_from_normal_to_accumulating:
                 request.self_spec_state = SelfSpecState.ACCUMULATING
-
+                #print("Flipped to accumulating state")
+                #breakpoint()
             if not stopped:
                 new_running.append(request)
 

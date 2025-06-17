@@ -57,6 +57,8 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
+from vllm.v1.request import SelfSpecState
+
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
 
@@ -378,6 +380,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                selective_kv_indices=scheduler_output.sparse_selected_kv_indices_of_scheduled_reqs.get(req_id, []),
+                num_selective_kv_indices=len(scheduler_output.sparse_selected_kv_indices_of_scheduled_reqs.get(req_id, [])),
+                full_kv_start_offset=scheduler_output.full_kv_start_offset.get(req_id, 0),
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -428,23 +433,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_tokens = req_data.num_computed_tokens
             req_state.num_computed_tokens = num_computed_tokens
             
-            # Sync self-spec state from scheduler (simple copying approach)
-            if hasattr(req_data, 'pending_output_tokens') and req_data.pending_output_tokens is not None:
-                req_state.pending_output_tokens = req_data.pending_output_tokens.copy()
-            if hasattr(req_data, 'self_spec_state'):
-                req_state.self_spec_state = req_data.self_spec_state
-            
+            # === Self-spec related ===
+            req_state.pending_output_tokens = req_data.pending_output_tokens.copy()
+            req_state.self_spec_state = req_data.self_spec_state
+            sparse_selected_kv_indices = scheduler_output.sparse_selected_kv_indices_of_scheduled_reqs.get(req_id, [])
+            full_kv_start_offset = scheduler_output.full_kv_start_offset.get(req_id, 0)
+            num_selective_kv_indices = len(sparse_selected_kv_indices)
+            req_state.selective_kv_indices = sparse_selected_kv_indices
+            req_state.num_selective_kv_indices = num_selective_kv_indices
+            req_state.full_kv_start_offset = full_kv_start_offset
+            # === End of Self-spec related ===
+
             # Add the sampled token(s) from the previous step (if any).
             # This doesn't include "unverified" tokens like spec decode tokens.
-            num_new_tokens = (num_computed_tokens +
-                              len(req_data.new_token_ids) -
-                              req_state.num_tokens)
-            if num_new_tokens == 1:
-                # Avoid slicing list in most common case.
-                req_state.output_token_ids.append(req_data.new_token_ids[-1])
-            elif num_new_tokens > 0:
-                req_state.output_token_ids.extend(
-                    req_data.new_token_ids[-num_new_tokens:])
+            if req_state.self_spec_state == SelfSpecState.ACCUMULATING:
+                pass
+            else:
+                num_new_tokens = (num_computed_tokens +
+                                len(req_data.new_token_ids) -
+                                req_state.num_tokens)
+                print("In update_states, num_new_tokens: ", num_new_tokens)
+                if num_new_tokens == 1:
+                    # Avoid slicing list in most common case.
+                    req_state.output_token_ids.append(req_data.new_token_ids[-1])
+                elif num_new_tokens > 0:
+                    req_state.output_token_ids.extend(
+                        req_data.new_token_ids[-num_new_tokens:])
             
             # Update the block IDs.
             if not req_data.resumed_from_preemption:
@@ -469,6 +483,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens)
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
+            
+            # === Self-spec related ===
+            if num_selective_kv_indices > 0:
+                self.input_batch.selective_kv_indices_cpu[req_index, :num_selective_kv_indices] = sparse_selected_kv_indices
+                self.input_batch.num_selective_kv_indices_cpu[req_index] = num_selective_kv_indices
+            else:
+                self.input_batch.num_selective_kv_indices_cpu[req_index] = 0
+            self.input_batch.full_kv_start_offset_cpu[req_index] = req_state.full_kv_start_offset            
+            # === End of Self-spec related ===
+
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(req_data.new_token_ids)
@@ -598,7 +622,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_numbers * block_size,
                 block_offsets,
                 out=block_table.slot_mapping_np[:total_num_scheduled_tokens])
-
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
@@ -653,13 +676,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.attn_metadata_builders[kv_cache_group_id],
                 )
             #NOTE(brian1009): We need to hack here.....
+            #if self.input_batch.num_selective_kv_indices_cpu[0] > 0:
             attn_metadata_i = (
-                self.attn_metadata_builders[kv_cache_group_id].build(
+                self.attn_metadata_builders[kv_cache_group_id].build_with_selective_kv(
                     num_reqs=num_reqs,
                     num_actual_tokens=total_num_scheduled_tokens,
                     max_query_len=max_num_scheduled_tokens,
                     common_prefix_len=common_prefix_len,
-                    common_attn_metadata=common_attn_metadata))
+                    common_attn_metadata=common_attn_metadata,
+                ))
+            # else:
+            # attn_metadata_i = (self.attn_metadata_builders[kv_cache_group_id].build(
+            #     num_reqs=num_reqs,
+            #     num_actual_tokens=total_num_scheduled_tokens,
+            #     max_query_len=max_num_scheduled_tokens,
+            #     common_prefix_len=common_prefix_len,
+            #     common_attn_metadata=common_attn_metadata))
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -1124,6 +1156,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         self._update_states(scheduler_output)
+        print("Finish updating input states.")
+        print("Updated CachedRequestState:")
+        for req_id, req_state in self.requests.items():
+            print(f"Request {req_id}:")
+            print(f"  selective_kv_indices: {req_state.selective_kv_indices}")
+            print(f"  num_selective_kv_indices: {req_state.num_selective_kv_indices}")
+            print(f"  full_kv_start_offset: {req_state.full_kv_start_offset}")
+            print(f"  num_computed_tokens: {req_state.num_computed_tokens}")
+            print(f"  num_tokens: {req_state.num_tokens}")
+            print(f"  self_spec_state: {req_state.self_spec_state}")
+            print(f"  output_token_ids: {req_state.output_token_ids}")
+        print("Updated InputBatch:")
+        print(f"Input_batch.selective_kv_indices_cpu: {self.input_batch.selective_kv_indices_cpu[:2, :32]}")
+        print(f"Input_batch.num_selective_kv_indices_cpu: {self.input_batch.num_selective_kv_indices_cpu[:2]}")
+        print(f"Input_batch.full_kv_start_offset_cpu: {self.input_batch.full_kv_start_offset_cpu[:2]}")
+        #breakpoint()
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOutput if there's no work to do.
@@ -1133,12 +1181,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Prepare the decoder inputs.
         print("Start Prepare Inputs")
-        breakpoint()
+        #breakpoint()
         # TODO: customized metadata
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
         print("Prepare Inputs Done")
-        breakpoint()
+        #breakpoint()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1259,6 +1307,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+            #print("In model executor, Sampler output: ", sampler_output)
+            #breakpoint()
+
         else:
             # When indexing with a tensor (bonus_logits_indices), PyTorch
             # creates a new tensor with separate storage from the original
@@ -1287,6 +1338,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
+
+        # TODO(brian1009): Check if there are any other places need the req_state.num_tokens?
         discard_sampled_tokens_req_indices = []
         for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
@@ -1302,7 +1355,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Record the index of the request that should not be sampled,
                 # so that we could clear the sampled tokens before returning.
                 discard_sampled_tokens_req_indices.append(i)
-
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         logprobs_tensors = sampler_output.logprobs_tensors

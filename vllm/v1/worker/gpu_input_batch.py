@@ -15,7 +15,7 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-
+from vllm.v1.request import SelfSpecState
 _SAMPLING_EPS = 1e-5
 
 
@@ -35,12 +35,22 @@ class CachedRequestState:
     
     # Self-speculative decoding fields (simple copying approach)
     pending_output_tokens: list[int] = field(default_factory=list)
-    self_spec_state: str = "normal"
+    self_spec_state: SelfSpecState = SelfSpecState.NORMAL
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+    
+    # Selective KV indices for this request
+    selective_kv_indices: Optional[list[int]] = None
+    
+    # Number of selective KV indices for this request
+    num_selective_kv_indices: int = 0
+    
+    # The offset point where full KV caching starts for all subsequent tokens
+    # All tokens at or after this offset are kept in full KV cache
+    full_kv_start_offset: int = 0  # 0 means all tokens are used (full KV cache)
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -100,6 +110,37 @@ class InputBatch:
         )
         self.num_computed_tokens_cpu = \
             self.num_computed_tokens_cpu_tensor.numpy()
+
+        # Selective KV indices buffers
+        # Similar to token_ids_cpu, this stores selective KV indices for each request
+        # We use max_model_len as the max possible number of indices per request
+        self.selective_kv_indices_cpu_tensor = torch.zeros(
+            (max_num_reqs, 512), #FIXME(brian1009): hardcoded for now
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=False,
+        )
+        self.selective_kv_indices_cpu = self.selective_kv_indices_cpu_tensor.numpy()
+        
+        # Track the number of selective KV indices for each request
+        self.num_selective_kv_indices_cpu_tensor = torch.zeros(
+            (max_num_reqs, ),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.num_selective_kv_indices_cpu = self.num_selective_kv_indices_cpu_tensor.numpy()
+
+        # Track when full KV caching starts for each request
+        # This is the offset point where we switched from selective KV to keeping all tokens
+        # All tokens at or after this offset should use full KV indices
+        self.full_kv_start_offset_cpu_tensor = torch.zeros(
+            (max_num_reqs, ),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.full_kv_start_offset_cpu = self.full_kv_start_offset_cpu_tensor.numpy()
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
@@ -272,6 +313,19 @@ class InputBatch:
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
 
+        # Copy selective KV indices if they exist
+        if request.selective_kv_indices is not None:
+            num_selective_kv_indices = request.num_selective_kv_indices
+            self.num_selective_kv_indices_cpu[req_index] = num_selective_kv_indices
+            if num_selective_kv_indices > 0:
+                self.selective_kv_indices_cpu[
+                    req_index, :num_selective_kv_indices] = request.selective_kv_indices
+        else:
+            self.num_selective_kv_indices_cpu[req_index] = 0
+            
+        # Copy selective KV activation offset
+        self.full_kv_start_offset_cpu[req_index] = request.full_kv_start_offset
+
         sampling_params = request.sampling_params
         if sampling_params.sampling_type == SamplingType.GREEDY:
             # Avoid later division by zero.
@@ -366,6 +420,7 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
+
         self.greedy_reqs.discard(req_id)
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
@@ -429,6 +484,18 @@ class InputBatch:
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
         self.min_p_cpu[i1], self.min_p_cpu[i2] =\
             self.min_p_cpu[i2], self.min_p_cpu[i1]
+
+        # Swap selective KV indices
+        self.num_selective_kv_indices_cpu[i1], self.num_selective_kv_indices_cpu[i2] =\
+            self.num_selective_kv_indices_cpu[i2], self.num_selective_kv_indices_cpu[i1]
+        # Swap the entire rows for selective KV indices
+        temp_kv_indices = self.selective_kv_indices_cpu[i1, ...].copy()
+        self.selective_kv_indices_cpu[i1, ...] = self.selective_kv_indices_cpu[i2, ...]
+        self.selective_kv_indices_cpu[i2, ...] = temp_kv_indices
+        
+        # Swap selective KV activation offsets
+        self.full_kv_start_offset_cpu[i1], self.full_kv_start_offset_cpu[i2] =\
+            self.full_kv_start_offset_cpu[i2], self.full_kv_start_offset_cpu[i1]
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -497,6 +564,22 @@ class InputBatch:
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
+            
+            # Move selective KV indices
+            num_selective_kv_indices = self.num_selective_kv_indices_cpu[last_req_index]
+            self.num_selective_kv_indices_cpu[empty_index] = num_selective_kv_indices
+            if num_selective_kv_indices > 0:
+                self.selective_kv_indices_cpu[empty_index, :num_selective_kv_indices] = \
+                    self.selective_kv_indices_cpu[last_req_index, :num_selective_kv_indices]
+            # Clear the old location
+            self.num_selective_kv_indices_cpu[last_req_index] = 0
+            self.selective_kv_indices_cpu[last_req_index].fill_(0)
+            
+            # Move selective KV activation offset
+            self.full_kv_start_offset_cpu[empty_index] = \
+                self.full_kv_start_offset_cpu[last_req_index]
+            self.full_kv_start_offset_cpu[last_req_index] = 0
+
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]

@@ -2,6 +2,9 @@
 import argparse
 import json
 import os
+import random
+import numpy as np
+import torch
 
 # Set environment variables
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -28,7 +31,7 @@ def load_prompts(dataset_path, num_prompts):
             return []
     else:
         # Default prompts if dataset file doesn't exist
-        prompts = ["The future of AI is", "Can you tell me how to train a model?"]
+        prompts = ["The future of AI is", "The future of technology is"]
     return prompts[:num_prompts]
 
 
@@ -49,7 +52,7 @@ def parse_args():
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048, help="Maximum batched tokens")
     parser.add_argument("--temp", type=float, default=0, help="Sampling temperature")
     parser.add_argument("--enable_speculative", action="store_true", help="Enable self-speculative decoding")
-    parser.add_argument("--num_speculative_tokens", type=int, default=16, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--num_speculative_tokens", type=int, default=4, help="Number of speculative tokens for self-spec")
     return parser.parse_args()
 
 
@@ -66,9 +69,15 @@ def get_speculative_config(args):
 
 
 def main():
+    # Set random seeds for reproducibility
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
     args = parse_args()
 
-    model_dir = "meta-llama/Llama-3.1-8B-Instruct"
+    model_dir = "meta-llama/Meta-Llama-3.1-8B-Instruct"
     max_model_len = 2048
 
     # Load tokenizer and prepare prompts
