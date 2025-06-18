@@ -8,6 +8,8 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
 
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+os.environ["VLLM_USE_V1"] = "1"
 
 def load_prompts(dataset_path, num_prompts):
     if os.path.exists(dataset_path):

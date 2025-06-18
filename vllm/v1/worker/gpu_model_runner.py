@@ -418,10 +418,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
+        print("Updating CachedRequestStates")
+        breakpoint()
         for req_data in scheduler_output.scheduled_cached_reqs:
+
             req_id = req_data.req_id
             req_state = self.requests[req_id]
-
             # Update the cached states.
             num_computed_tokens = req_data.num_computed_tokens
             req_state.num_computed_tokens = num_computed_tokens
@@ -1116,6 +1118,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
 
         self._update_states(scheduler_output)
+        print("Updated CachedRequestStates")
+        for id,request in self.requests.items():
+            print(f"==================CachedRequestStates {id}============================")
+            print(f"CachedRequestStates {id} has num_computed_tokens: {request.num_computed_tokens}")
+            print(f"CachedRequestStates {id} has num_tokens: {request.num_tokens}")
+            print(f"CachedRequestStates {id} has output_token_ids: {request.output_token_ids}")
+            print(f"================================================")
+        breakpoint()
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOutput if there's no work to do.

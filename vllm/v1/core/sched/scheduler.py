@@ -837,6 +837,13 @@ class Scheduler(SchedulerInterface):
             engine_core_outputs.finished_requests = (
                 scheduler_output.finished_req_ids | self.finished_req_ids)
 
+        for id,request in self.requests.items():
+            print(f"==================Request {id}============================")
+            print(f"Request {id} has num_computed_tokens: {request.num_computed_tokens}")
+            print(f"Request {id} has num_tokens: {request.num_tokens}")
+            print(f"Request {id} has output_token_ids: {request.output_token_ids}")
+            print(f"Request {id} all_token_ids: {request.all_token_ids}")
+            print(f"================================================")
         return engine_core_outputs
 
     def add_request(self, request: Request) -> None:
