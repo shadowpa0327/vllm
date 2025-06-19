@@ -52,7 +52,8 @@ def parse_args():
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048, help="Maximum batched tokens")
     parser.add_argument("--temp", type=float, default=0, help="Sampling temperature")
     parser.add_argument("--enable_speculative", action="store_true", help="Enable self-speculative decoding")
-    parser.add_argument("--num_speculative_tokens", type=int, default=4, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--num_speculative_tokens", type=int, default=8, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching")
     return parser.parse_args()
 
 
@@ -107,7 +108,7 @@ def main():
         "max_model_len": max_model_len,
         "max_num_seqs": args.max_num_seqs,
         "gpu_memory_utilization": 0.8,
-        "enable_prefix_caching": False,
+        "enable_prefix_caching": args.enable_prefix_caching,
         "disable_log_stats": False,
         "block_size": 1, # NOTE(brian1009): Set to 1 to disable prefix caching
     }

@@ -285,11 +285,20 @@ class Scheduler(SchedulerInterface):
                 print("num_draft_tokens:", num_draft_tokens)
                 print("Self Spec State:", request.self_spec_state)
                 #print("Allocated KV_ids:", self.kv_cache_manager.get_block_ids(request.request_id))
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens,
-                    num_draft_tokens=num_draft_tokens,
-                    num_lookahead_tokens=self.num_lookahead_tokens)
+                if request.self_spec_state == SelfSpecState.ACCUMULATING:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_draft_tokens=num_draft_tokens,
+                        num_lookahead_tokens=self.num_lookahead_tokens,
+                        delay_cache_blocks=True
+                    )
+                else:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_draft_tokens=num_draft_tokens,
+                        num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     #breakpoint()
                     # The request cannot be scheduled.
