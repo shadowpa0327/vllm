@@ -224,16 +224,16 @@ class EngineCore:
             )
         #breakpoint()
         scheduler_output = self.scheduler.schedule()
-        print("Scheduler Output:", scheduler_output)
+        #print("Scheduler Output:", scheduler_output)
         #breakpoint()
         model_output = self.execute_model(scheduler_output)
-        print("Start Update from Output")
+        #print("Start Update from Output")
         #breakpoint()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
         #print("Finished Update from Output")
-        if engine_core_outputs.scheduler_stats.spec_decoding_stats is not None:
-            print(engine_core_outputs.scheduler_stats.spec_decoding_stats)
+        #if engine_core_outputs.scheduler_stats.spec_decoding_stats is not None:
+        #    print(engine_core_outputs.scheduler_stats.spec_decoding_stats)
         #print(engine_core_outputs)
         return engine_core_outputs
 

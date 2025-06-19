@@ -572,13 +572,13 @@ class InputBatch:
                 self.selective_kv_indices_cpu[empty_index, :num_selective_kv_indices] = \
                     self.selective_kv_indices_cpu[last_req_index, :num_selective_kv_indices]
             # Clear the old location
-            self.num_selective_kv_indices_cpu[last_req_index] = 0
-            self.selective_kv_indices_cpu[last_req_index].fill_(0)
+            #self.num_selective_kv_indices_cpu[last_req_index] = 0
+            #self.selective_kv_indices_cpu[last_req_index].fill_(0)
             
             # Move selective KV activation offset
             self.full_kv_start_offset_cpu[empty_index] = \
                 self.full_kv_start_offset_cpu[last_req_index]
-            self.full_kv_start_offset_cpu[last_req_index] = 0
+            #self.full_kv_start_offset_cpu[last_req_index] = 0
 
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]

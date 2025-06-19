@@ -117,7 +117,6 @@ def infer_global_hyperparameters(
     """
 
     assert len(per_layer_params) > 0, "No attention layers found in the model."
-
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
     for params in param_sets:
@@ -560,6 +559,10 @@ class FlashInferMetadataBuilder:
             num_reqs,
             BLOCK_SIZE=128,
         )
+        # print("[FlashInfer]: Preparing paged_kv_indices and paged_kv_indptr...")
+        # print(f"paged_kv_indices: {paged_kv_indices}")
+        # print(f"paged_kv_indptr: {paged_kv_indptr}")
+
         # print(f"len_selected_kv_indices: {len_selected_kv_indices_tensor}")
         # print(f"len_all_kv_indices: {len_all_kv_indices}")
         # print(f"full_kv_start_offset: {full_kv_start_offset_tensor}")

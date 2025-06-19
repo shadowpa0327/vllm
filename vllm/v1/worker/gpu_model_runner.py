@@ -452,7 +452,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_new_tokens = (num_computed_tokens +
                                 len(req_data.new_token_ids) -
                                 req_state.num_tokens)
-                print("In update_states, num_new_tokens: ", num_new_tokens)
+                #print("In update_states, num_new_tokens: ", num_new_tokens)
                 if num_new_tokens == 1:
                     # Avoid slicing list in most common case.
                     req_state.output_token_ids.append(req_data.new_token_ids[-1])
@@ -1156,21 +1156,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         self._update_states(scheduler_output)
-        print("Finish updating input states.")
-        print("Updated CachedRequestState:")
-        for req_id, req_state in self.requests.items():
-            print(f"Request {req_id}:")
-            print(f"  selective_kv_indices: {req_state.selective_kv_indices}")
-            print(f"  num_selective_kv_indices: {req_state.num_selective_kv_indices}")
-            print(f"  full_kv_start_offset: {req_state.full_kv_start_offset}")
-            print(f"  num_computed_tokens: {req_state.num_computed_tokens}")
-            print(f"  num_tokens: {req_state.num_tokens}")
-            print(f"  self_spec_state: {req_state.self_spec_state}")
-            print(f"  output_token_ids: {req_state.output_token_ids}")
-        print("Updated InputBatch:")
-        print(f"Input_batch.selective_kv_indices_cpu: {self.input_batch.selective_kv_indices_cpu[:2, :32]}")
-        print(f"Input_batch.num_selective_kv_indices_cpu: {self.input_batch.num_selective_kv_indices_cpu[:2]}")
-        print(f"Input_batch.full_kv_start_offset_cpu: {self.input_batch.full_kv_start_offset_cpu[:2]}")
+        # print("Finish updating input states.")
+        # print("Updated CachedRequestState:")
+        # for req_id, req_state in self.requests.items():
+        #     print(f"Request {req_id}:")
+        #     print(f"  selective_kv_indices: {req_state.selective_kv_indices}")
+        #     print(f"  num_selective_kv_indices: {req_state.num_selective_kv_indices}")
+        #     print(f"  full_kv_start_offset: {req_state.full_kv_start_offset}")
+        #     print(f"  num_computed_tokens: {req_state.num_computed_tokens}")
+        #     print(f"  num_tokens: {req_state.num_tokens}")
+        #     print(f"  self_spec_state: {req_state.self_spec_state}")
+        #     print(f"  output_token_ids: {req_state.output_token_ids}")
+        # print("Updated InputBatch:")
+        # print(f"Input_batch.selective_kv_indices_cpu: {self.input_batch.selective_kv_indices_cpu[:2, :32]}")
+        # print(f"Input_batch.num_selective_kv_indices_cpu: {self.input_batch.num_selective_kv_indices_cpu[:2]}")
+        # print(f"Input_batch.full_kv_start_offset_cpu: {self.input_batch.full_kv_start_offset_cpu[:2]}")
         #breakpoint()
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
@@ -1180,12 +1180,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
-        print("Start Prepare Inputs")
+        #print("Start Prepare Inputs")
         #breakpoint()
         # TODO: customized metadata
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
-        print("Prepare Inputs Done")
+        #print("Prepare Inputs Done")
         #breakpoint()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph

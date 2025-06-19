@@ -7,15 +7,15 @@ import numpy as np
 import torch
 
 # Set environment variables
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
+os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
-
 
 def load_prompts(dataset_path, num_prompts):
     """Load prompts from dataset file or use default prompts."""
@@ -25,13 +25,13 @@ def load_prompts(dataset_path, num_prompts):
             with open(dataset_path) as f:
                 for line in f:
                     data = json.loads(line)
-                    prompts.append(data["turns"][0])
+                    prompts.append(data["question"])
         except Exception as e:
             print(f"Error reading dataset: {e}")
             return []
     else:
         # Default prompts if dataset file doesn't exist
-        prompts = ["The future of AI is", "The future of technology is"]
+        prompts = ["The future of AI is", "The future of technology is", "The mission of a PhD student is"]
     return prompts[:num_prompts]
 
 
@@ -44,8 +44,8 @@ def parse_args():
         default="./examples/data/gsm8k.jsonl",
         help="Path to dataset file",
     )
-    parser.add_argument("--max_num_seqs", type=int, default=8, help="Maximum number of sequences")
-    parser.add_argument("--num_prompts", type=int, default=80, help="Number of prompts to process")
+    parser.add_argument("--max_num_seqs", type=int, default=4, help="Maximum number of sequences")
+    parser.add_argument("--num_prompts", type=int, default=4, help="Number of prompts to process")
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--enforce_eager", action="store_true", help="Enforce eager execution")
     parser.add_argument("--enable_chunked_prefill", action="store_true", help="Enable chunked prefill")
@@ -78,9 +78,8 @@ def main():
         torch.cuda.manual_seed_all(42)
     args = parse_args()
 
-    model_dir = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    model_dir = "/root/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659"
     max_model_len = 2048
-
     # Load tokenizer and prepare prompts
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     prompts = load_prompts(args.dataset, args.num_prompts)
@@ -109,7 +108,7 @@ def main():
         "max_num_seqs": args.max_num_seqs,
         "gpu_memory_utilization": 0.8,
         "enable_prefix_caching": args.enable_prefix_caching,
-        "disable_log_stats": False,
+        "disable_log_stats": True,
         "block_size": 1, # NOTE(brian1009): Set to 1 to disable prefix caching
     }
     
@@ -120,13 +119,15 @@ def main():
         print("Self-speculative decoding disabled")
 
     llm = LLM(**llm_kwargs)
-
+    
     # Set up sampling parameters
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
 
     # Generate outputs
     print("Starting generation...")
+    llm.start_profile()
     outputs = llm.generate(prompt_token_ids=prompt_ids, sampling_params=sampling_params)
+    llm.stop_profile()
 
     # Print generated text
     for i, output in enumerate(outputs):
@@ -136,12 +137,14 @@ def main():
         print(f"Prompt: {output.prompt}")
         print(f"Generated: {output.outputs[0].text}")
 
+
+    print(type(llm.llm_engine))
     # Print metrics if available
     try:
         metrics = llm.get_metrics()
         print_metrics(metrics)
     except AssertionError:
-        print("\nMetrics are not supported in the V0 engine.")
+        print("\nNo metrics available")
 
 
 def print_metrics(metrics):

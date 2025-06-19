@@ -220,7 +220,7 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule = None
             # NOTE(brian1009): Check if request should start verification (reuse spec decoding interface)
             if self.use_self_specs and self.should_start_self_spec_verification(request):
-                print(f"Found Request:{request.request_id} that should start verification !")
+                #print(f"Found Request:{request.request_id} that should start verification !")
                 # NOTE(brian1009): Adjust num_computed_tokens to exclude pending tokens
                 # The scheduler has been incrementing num_computed_tokens for pending tokens,
                 # but when we move them to spec_token_ids for verification, they should be
@@ -280,10 +280,10 @@ class Scheduler(SchedulerInterface):
                     request.num_tokens, 0)
 
             while True:
-                print("Request:", request.request_id)
-                print("num_new_tokens:", num_new_tokens)
-                print("num_draft_tokens:", num_draft_tokens)
-                print("Self Spec State:", request.self_spec_state)
+                # print("Request:", request.request_id)
+                # print("num_new_tokens:", num_new_tokens)
+                # print("num_draft_tokens:", num_draft_tokens)
+                # print("Self Spec State:", request.self_spec_state)
                 #print("Allocated KV_ids:", self.kv_cache_manager.get_block_ids(request.request_id))
                 if request.self_spec_state == SelfSpecState.ACCUMULATING:
                     new_blocks = self.kv_cache_manager.allocate_slots(
