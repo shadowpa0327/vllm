@@ -530,6 +530,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
+            # breakpoint()
             self.input_batch.condense(removed_req_indices)
 
         batch_reordered = self._may_reorder_batch(scheduler_output)

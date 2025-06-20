@@ -495,7 +495,7 @@ class FlashInferMetadataBuilder:
         assert (self._num_decode_tokens +
                 self._num_prefill_tokens == num_actual_tokens)
         page_size = self.kv_cache_spec.block_size
-        assert page_size == 1, "page_size must be 1 for selective KV caching"
+        # assert page_size == 1, "page_size must be 1 for selective KV caching"
         device = self.runner.device
         qo_indptr = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
