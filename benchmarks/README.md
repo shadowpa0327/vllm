@@ -315,7 +315,7 @@ python3 vllm/benchmarks/benchmark_throughput.py \
 
 ```bash
 python3 benchmarks/benchmark_throughput.py \
-  --model Qwen/QwQ-32B \
+  --model /mnt/bn/siqi-sparse-rl/mnt/siqi_nas/HuggingFace-Download-Accelerator/hf_hub/models--Qwen--Qwen2.5-7B-Instruct \
   --backend vllm \
   --dataset-name hf \
   --dataset-path AI-MO/aimo-validation-aime \

@@ -78,7 +78,7 @@ def main():
         torch.cuda.manual_seed_all(42)
     args = parse_args()
 
-    model_dir = "/root/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659"
+    model_dir = "meta-llama/Meta-Llama-3.1-8B-Instruct"
     max_model_len = 2048
     # Load tokenizer and prepare prompts
     tokenizer = AutoTokenizer.from_pretrained(model_dir)

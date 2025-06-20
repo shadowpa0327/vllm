@@ -1455,6 +1455,12 @@ class CacheConfig:
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
+    sink_size: int = 32
+    """NOTE (siqi) These are parameters for streaming llm in self speculative decoding"""
+
+    recnet_size: int = 128
+    """NOTE (siqi) These are parameters for streaming llm in self speculative decoding"""
+    
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

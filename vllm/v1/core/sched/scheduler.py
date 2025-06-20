@@ -134,7 +134,7 @@ class Scheduler(SchedulerInterface):
         self.use_self_specs = False
         self.num_spec_tokens = self.num_lookahead_tokens = self.self_spec_threshold = 0
 
-        self.sink_size = self.recnet_size = -1 # For Sparse Attention
+        # self.sink_size = self.recnet_size = -1 # For Sparse Attention
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
@@ -144,8 +144,8 @@ class Scheduler(SchedulerInterface):
                 self.self_spec_threshold = self.num_spec_tokens
                 self.use_self_specs = True
                 # FIXME(brian1009): Hardcoded for sparse attn.
-                self.recnet_size = 60
-                self.sink_size = 4
+                self.recnet_size = self.cache_config.recnet_size
+                self.sink_size = self.cache_config.sink_size
 
         # NOTE(brian1009): Selective KV Indices for sparse attention for each request
         # We expected this maintain the logical KV indices for each request

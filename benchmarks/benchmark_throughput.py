@@ -36,6 +36,49 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
+from vllm.v1.metrics.reader import Counter, Vector
+
+
+def print_metrics(metrics):
+    """Print self-speculative decoding metrics."""
+    num_drafts = num_accepted = 0
+    acceptance_counts = [0] * 16  # Track acceptance at each position
+    
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens":
+            assert isinstance(metric, Counter)
+            num_accepted += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                acceptance_counts[pos] += metric.values[pos]
+
+    if num_drafts > 0:
+        print(f"\n{'='*60}")
+        print("SELF-SPECULATIVE DECODING METRICS")
+        print(f"{'='*60}")
+        print(f"Mean acceptance length: {1 + (num_accepted / num_drafts):.2f}")
+        print(f"Total drafts: {num_drafts}")
+        print(f"Total accepted: {num_accepted}")
+        
+        print("\nAcceptance rate by token position:")
+        for i in range(len(acceptance_counts)):
+            if acceptance_counts[i] > 0:
+                rate = acceptance_counts[i] / num_drafts
+                print(f"  Position {i}: {rate:.3f} ({acceptance_counts[i]}/{num_drafts})")
+
+
+def get_speculative_config(args, tokens):
+    """Get self-speculative decoding configuration based on arguments."""
+
+    return {
+        "method": "self_specs",
+        "model": None,
+        "num_speculative_tokens": tokens,
+    }
 
 
 def run_vllm(
@@ -43,8 +86,26 @@ def run_vllm(
     n: int,
     engine_args: EngineArgs,
     disable_detokenize: bool = False,
+    use_self_spec: bool = True,
+    spec_tokens: int = 4,
 ) -> tuple[float, Optional[list[RequestOutput]]]:
     from vllm import LLM, SamplingParams
+    
+    engine_args.block_size = 1
+    engine_args.enable_prefix_caching = False
+    # Get speculative config
+    if use_self_spec:
+        engine_args.block_size = 1
+        engine_args.enable_prefix_caching = False
+        speculative_config = get_speculative_config(engine_args, spec_tokens)
+
+    
+        if speculative_config is not None:
+            engine_args.speculative_config = speculative_config
+            print(f"Using self-speculative decoding with {speculative_config['num_speculative_tokens']} tokens")
+        else:
+            print("Self-speculative decoding disabled")
+
 
     llm = LLM(**dataclasses.asdict(engine_args))
     assert all(
@@ -109,6 +170,23 @@ def run_vllm(
             ),
         )
         end = time.perf_counter()
+    
+
+    # Print generated text
+    # for i, output in enumerate(outputs):
+    #     print(f"\n{'='*60}")
+    #     print(f"Output {i+1}/{len(outputs)}")
+    #     print(f"{'='*60}")
+    #     print(f"Prompt: {output.prompt}")
+    #     print(f"Generated: {output.outputs[0].text}")
+
+    # Print metrics if available
+    try:
+        metrics = llm.get_metrics()
+        print_metrics(metrics)
+    except AssertionError:
+        print("\nMetrics are not supported in the V0 engine.")
+
     return end - start, outputs
 
 
@@ -379,7 +457,13 @@ def get_requests(args, tokenizer):
     return dataset_cls(**common_kwargs).sample(**sample_kwargs)
 
 
-def main(args: argparse.Namespace):
+def main(args: argparse.Namespace, use_self_spec, spec_tokens):
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_USE_V1"] = "1"
+    os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
+    os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
+
+
     if args.seed is None:
         args.seed = 0
     print(args)
@@ -408,6 +492,8 @@ def main(args: argparse.Namespace):
                 args.n,
                 EngineArgs.from_cli_args(args),
                 args.disable_detokenize,
+                use_self_spec,
+                spec_tokens
             )
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -714,10 +800,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--hf-split", type=str, default=None, help="Split of the HF dataset."
     )
+    parser.add_argument("--enable-speculative", action="store_true", help="Enable self-speculative decoding")
+    
+    parser.add_argument("--num-speculative-tokens", type=int, default=4, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--sink-size", type=int, default=4, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--recnet-size", type=int, default=4, help="Number of speculative tokens for self-spec")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
     validate_args(args)
-    main(args)
+    print(args.enable_speculative)
+    main(args, args.enable_speculative, args.num_speculative_tokens)
+
+
+
