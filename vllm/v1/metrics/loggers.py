@@ -60,6 +60,11 @@ class LoggingStatLogger(StatLoggerBase):
         self.spec_decoding_logging = SpecDecodingLogging()
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
+        
+        self.total_scheduled_tokens_history: list[int] = []
+        self.num_scheduled_reqs_history: list[int] = []
+        self.num_cached_reqs_in_accumulating_history: list[int] = []
+        self.num_cached_reqs_in_verifying_history: list[int] = []
 
     def _reset(self, now):
         self.last_log_time = now
@@ -119,7 +124,9 @@ class LoggingStatLogger(StatLoggerBase):
             "Avg generation throughput: %.1f tokens/s, "
             "Running: %d reqs, Waiting: %d reqs, "
             "GPU KV cache usage: %.1f%%, "
-            "Prefix cache hit rate: %.1f%%",
+            "Prefix cache hit rate: %.1f%%, "
+            "Current scheduled tokens: %d, "
+            "Current scheduled reqs: %d",
             self.engine_index,
             prompt_throughput,
             generation_throughput,
@@ -127,6 +134,8 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.num_waiting_reqs,
             scheduler_stats.gpu_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
+            scheduler_stats.total_num_scheduled_tokens,
+            scheduler_stats.num_scheduled_reqs,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
 
@@ -174,6 +183,16 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_waiting = self._gauge_cls(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.gauge_total_scheduled_tokens = self._gauge_cls(
+            name="vllm:total_scheduled_tokens",
+            documentation="Total number of tokens scheduled in this step.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.gauge_num_scheduled_reqs = self._gauge_cls(
+            name="vllm:num_scheduled_requests",
+            documentation="Number of requests scheduled in this step.",
             labelnames=labelnames).labels(*labelvalues)
 
         #
@@ -356,6 +375,16 @@ class PrometheusStatLogger(StatLoggerBase):
                         self.labelname_running_lora_adapters,
                     ])
 
+
+        #
+        # SSpec Infos
+        # 
+        self.total_scheduled_tokens_history: list[int] = []
+        self.num_scheduled_reqs_history: list[int] = []
+        self.num_cached_reqs_in_accumulating_history: list[int] = []
+        self.num_cached_reqs_in_verifying_history: list[int] = []
+
+
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = self.engine_index
@@ -382,6 +411,22 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
         self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+
+        # SSpec related
+        self.total_scheduled_tokens_history.append(
+            scheduler_stats.total_num_scheduled_tokens)
+        self.num_scheduled_reqs_history.append(
+            scheduler_stats.num_scheduled_reqs)
+        self.num_cached_reqs_in_accumulating_history.append(
+            scheduler_stats.num_cached_reqs_in_accumulating)
+        self.num_cached_reqs_in_verifying_history.append(
+            scheduler_stats.num_cached_reqs_in_verifying)
+
+        self.gauge_total_scheduled_tokens.set(
+            scheduler_stats.total_num_scheduled_tokens)
+        
+        self.gauge_num_scheduled_reqs.set(
+            scheduler_stats.num_scheduled_reqs)
 
         self.counter_gpu_prefix_cache_queries.inc(
             scheduler_stats.prefix_cache_stats.queries)

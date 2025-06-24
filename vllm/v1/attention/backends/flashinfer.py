@@ -559,10 +559,6 @@ class FlashInferMetadataBuilder:
             num_reqs,
             BLOCK_SIZE=128,
         )
-        # print("[FlashInfer]: Preparing paged_kv_indices and paged_kv_indptr...")
-        # print(f"paged_kv_indices: {paged_kv_indices}")
-        # print(f"paged_kv_indptr: {paged_kv_indptr}")
-
         # print(f"len_selected_kv_indices: {len_selected_kv_indices_tensor}")
         # print(f"len_all_kv_indices: {len_all_kv_indices}")
         # print(f"full_kv_start_offset: {full_kv_start_offset_tensor}")
@@ -576,7 +572,15 @@ class FlashInferMetadataBuilder:
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
-
+        # print("================================================")
+        # print(f"num_prefills: {self._num_prefills}")
+        # print(f"num_decodes: {self._num_decodes}")
+        # print(f"num_prefill_tokens: {self._num_prefill_tokens}")
+        # print(f"num_decode_tokens: {self._num_decode_tokens}")
+        # print(f"num_actual_tokens: {num_actual_tokens}")
+        # print(f"num_reqs: {num_reqs}")
+        # print(f"num_selected_kv_indices: {len_selected_kv_indices_tensor}")
+        # print("================================================")
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr=qo_indptr,

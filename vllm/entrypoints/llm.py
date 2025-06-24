@@ -113,7 +113,7 @@ class LLM:
             you can use to hold the model weights, at the cost of CPU-GPU data
             transfer for every forward pass.
         NOTE (siqi) sink_size: The size (tokens) of the sink buffer. (tokens at the beginning)
-        NOTE (siqi) recnet_size: The size (tokens) of the recnet buffer. (tokens at the end)
+        NOTE (siqi) recent_size: The size (tokens) of the recent buffer. (tokens at the end)
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -185,7 +185,7 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         sink_size: int = 32,
-        recnet_size: int = 128,
+        recent_size: int = 128,
         enforce_eager: bool = False,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
@@ -242,7 +242,7 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             sink_size=sink_size,
-            recnet_size=recnet_size,
+            recent_size=recent_size,
             enforce_eager=enforce_eager,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,

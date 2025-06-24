@@ -96,7 +96,7 @@ def run_vllm(
     # Get speculative config
     if use_self_spec:
         engine_args.block_size = 1
-        engine_args.enable_prefix_caching = False
+        engine_args.enable_prefix_caching = True
         speculative_config = get_speculative_config(engine_args, spec_tokens)
 
     
@@ -802,9 +802,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--enable-speculative", action="store_true", help="Enable self-speculative decoding")
     
-    parser.add_argument("--num-speculative-tokens", type=int, default=4, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--num-speculative-tokens", type=int, default=8, help="Number of speculative tokens for self-spec")
     parser.add_argument("--sink-size", type=int, default=4, help="Number of speculative tokens for self-spec")
-    parser.add_argument("--recnet-size", type=int, default=4, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--recent-size", type=int, default=256, help="Number of speculative tokens for self-spec")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()

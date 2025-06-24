@@ -33,6 +33,18 @@ class SchedulerStats:
     num_waiting_reqs: int = 0
 
     gpu_cache_usage: float = 0.0
+    
+    # Total number of tokens scheduled in this step
+    total_num_scheduled_tokens: int = 0
+    
+    # Number of requests scheduled in this step (new + cached)
+    num_scheduled_reqs: int = 0
+    
+    # Number of cached requests in accumulating state (self-spec)
+    num_cached_reqs_in_accumulating: int = 0
+    
+    # Number of cached requests in verifying state (self-spec)
+    num_cached_reqs_in_verifying: int = 0
 
     prefix_cache_stats: PrefixCacheStats = field(
         default_factory=PrefixCacheStats)

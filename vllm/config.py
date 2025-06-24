@@ -1458,7 +1458,7 @@ class CacheConfig:
     sink_size: int = 32
     """NOTE (siqi) These are parameters for streaming llm in self speculative decoding"""
 
-    recnet_size: int = 128
+    recent_size: int = 128
     """NOTE (siqi) These are parameters for streaming llm in self speculative decoding"""
     
     def compute_hash(self) -> str:
