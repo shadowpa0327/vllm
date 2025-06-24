@@ -4,6 +4,8 @@ import inspect
 import json
 import os
 import sys
+os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
+
 from argparse import RawTextHelpFormatter
 from collections.abc import Generator
 from dataclasses import asdict, dataclass
@@ -395,9 +397,9 @@ Profile a model
 
     example:
     ```
-    python examples/offline_inference/profiling.py \\
-        --model neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8 --batch-size 4 \\
-        --prompt-len 512 --max-num-batched-tokens 8196 --json Llama31-8b-FP8 \\
+    python examples/offline_inference/profiling.py \
+        --model /root/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659 --batch-size 4 \
+        --prompt-len 512 --max-num-batched-tokens 8196 --json Llama31-8b \
         --enforce-eager run_num_steps -n 2
     ```
 
@@ -453,7 +455,6 @@ Profile a model
         help=f"Number of requests to run as a single batch, "
         f"default={BATCH_SIZE_DEFAULT}",
     )
-
     subparsers = parser.add_subparsers(dest="cmd")
 
     run_num_steps_parser = subparsers.add_parser(
@@ -506,4 +507,7 @@ def main(args):
 
 if __name__ == "__main__":
     args = parse_args()
+    #print(args)
+    args.gpu_memory_utilization = 0.8
+    #print(args)
     main(args)

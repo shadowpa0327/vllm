@@ -303,7 +303,7 @@ class EngineArgs:
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
-    recnet_size: int = CacheConfig.recnet_size
+    recent_size: int = CacheConfig.recent_size
     sink_size: int = CacheConfig.sink_size
     max_num_batched_tokens: Optional[
         int] = SchedulerConfig.max_num_batched_tokens
@@ -646,10 +646,10 @@ class EngineArgs:
         cache_group.add_argument("--block-size", **cache_kwargs["block_size"])
         cache_group.add_argument("--gpu-memory-utilization",
                                  **cache_kwargs["gpu_memory_utilization"])
-        # cache_group.add_argument("--recnet-size",
-        #                          **cache_kwargs["recnet_size"])
-        # cache_group.add_argument("--sink-size",
-        #                          **cache_kwargs["sink_size"])
+        cache_group.add_argument("--recent-size",
+                                 **cache_kwargs["recent_size"])
+        cache_group.add_argument("--sink-size",
+                                 **cache_kwargs["sink_size"])
         cache_group.add_argument("--swap-space", **cache_kwargs["swap_space"])
         cache_group.add_argument("--kv-cache-dtype",
                                  **cache_kwargs["cache_dtype"])
@@ -1027,7 +1027,7 @@ class EngineArgs:
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
-            recnet_size=self.recnet_size,
+            recent_size=self.recent_size,
             sink_size=self.sink_size,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,

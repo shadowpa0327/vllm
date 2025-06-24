@@ -506,8 +506,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if spec_token_ids:
                 start_index = end_token_index
                 end_token_index += len(spec_token_ids)
-                self.input_batch.token_ids_cpu[
-                    req_index, start_index:end_token_index] = spec_token_ids
+                try:
+                    self.input_batch.token_ids_cpu[
+                        req_index, start_index:end_token_index] = spec_token_ids
+                except Exception as e:
+                    print(f"Error adding spec token ids to token_ids_cpu: {e}")
+                    breakpoint()
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
 

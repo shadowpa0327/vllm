@@ -144,7 +144,7 @@ class Scheduler(SchedulerInterface):
                 self.self_spec_threshold = self.num_spec_tokens
                 self.use_self_specs = True
                 # FIXME(brian1009): Hardcoded for sparse attn.
-                self.recnet_size = self.cache_config.recnet_size
+                self.recent_size = self.cache_config.recent_size
                 self.sink_size = self.cache_config.sink_size
 
         # NOTE(brian1009): Selective KV Indices for sparse attention for each request
@@ -300,7 +300,6 @@ class Scheduler(SchedulerInterface):
                         num_draft_tokens=num_draft_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
-                    #breakpoint()
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
@@ -871,6 +870,7 @@ class Scheduler(SchedulerInterface):
                     if self.use_self_specs:
                         flip_from_normal_to_accumulating = True
                 else:
+                    breakpoint()
                     raise ValueError(f"During update_from_output, the request is in an invalid state: {request.self_spec_state}. Should be either ACCUMULATING or NORMAL.")
 
                 # Check for stop and update request state.
@@ -885,10 +885,10 @@ class Scheduler(SchedulerInterface):
             if not stopped and request.self_spec_state == SelfSpecState.NORMAL and flip_from_normal_to_accumulating:
                 all_kv_indices = self.kv_cache_manager.get_block_ids(request.request_id)[0][:request.num_computed_tokens]
                 # Handle overlapping case when recent_size is too large
-                if self.sink_size + self.recnet_size >= len(all_kv_indices):
+                if self.sink_size + self.recent_size >= len(all_kv_indices):
                     selective_kv_indices = all_kv_indices
                 else:
-                    selective_kv_indices = all_kv_indices[:self.sink_size] + all_kv_indices[-self.recnet_size:]
+                    selective_kv_indices = all_kv_indices[:self.sink_size] + all_kv_indices[-self.recent_size:]
                 self.req_to_sparse_selected_kv_indices[req_id] = selective_kv_indices
                 self.req_to_full_kv_start_offset[req_id] = request.num_computed_tokens
             
@@ -962,11 +962,29 @@ class Scheduler(SchedulerInterface):
             # to _cached_reqs_data will cause a memory leak.
             if req_data.req_id not in self.finished_req_ids:
                 self._cached_reqs_data[req_data.req_id].append(req_data)
-
         self.running = new_running
+        # Compute number of scheduled requests
+        num_scheduled_reqs = (len(scheduler_output.scheduled_new_reqs) + 
+                             len(scheduler_output.scheduled_cached_reqs))
+        
+        # calculate the number of cached request with self_spec_state == SelfSpecState.ACCUMULATING
+        num_cached_reqs_in_accumulating = 0
+        num_cached_reqs_in_verifying = 0
+        for req_data in scheduler_output.scheduled_cached_reqs:
+            if req_data.self_spec_state == SelfSpecState.ACCUMULATING:
+                num_cached_reqs_in_accumulating += 1
+            elif req_data.self_spec_state == SelfSpecState.VERIFYING:
+                num_cached_reqs_in_verifying += 1
+    
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
-            scheduler_stats=self.make_stats(spec_decoding_stats),
+            scheduler_stats=self.make_stats(
+                spec_decoding_stats, 
+                scheduler_output.total_num_scheduled_tokens,
+                num_scheduled_reqs,
+                num_cached_reqs_in_accumulating,
+                num_cached_reqs_in_verifying
+            ),
         )
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this
@@ -1043,6 +1061,10 @@ class Scheduler(SchedulerInterface):
     def make_stats(
         self,
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
+        total_num_scheduled_tokens: int = 0,
+        num_scheduled_reqs: int = 0,
+        num_cached_reqs_in_accumulating: int = 0,
+        num_cached_reqs_in_verifying: int = 0,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
@@ -1052,6 +1074,10 @@ class Scheduler(SchedulerInterface):
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             gpu_cache_usage=self.kv_cache_manager.usage,
+            total_num_scheduled_tokens=total_num_scheduled_tokens,
+            num_scheduled_reqs=num_scheduled_reqs,
+            num_cached_reqs_in_accumulating=num_cached_reqs_in_accumulating,
+            num_cached_reqs_in_verifying=num_cached_reqs_in_verifying,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
         )
