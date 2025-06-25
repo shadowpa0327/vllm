@@ -948,8 +948,6 @@ class Scheduler(SchedulerInterface):
 
             if flip_from_normal_to_accumulating:
                 request.self_spec_state = SelfSpecState.ACCUMULATING
-                #print("Flipped to accumulating state")
-                #breakpoint()
             if not stopped:
                 new_running.append(request)
 

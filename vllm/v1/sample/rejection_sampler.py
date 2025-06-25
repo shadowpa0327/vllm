@@ -90,7 +90,6 @@ class RejectionSampler(nn.Module):
             metadata.cu_num_draft_tokens,
             sampling_metadata,
         )
-
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
             metadata.num_draft_tokens,
