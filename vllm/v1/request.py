@@ -111,6 +111,16 @@ class Request:
         # Clear pending tokens
         self._pending_output_tokens.clear()
         return self.spec_token_ids
+
+    def start_suffix_verification(self) -> list[int]:
+        """Start verification and return tokens to verify"""
+        assert self.self_spec_state == SelfSpecState.ACCUMULATING
+        self.self_spec_state = SelfSpecState.VERIFYING
+        # Move pending tokens to spec_token_ids for verification
+        self.spec_token_ids = self._pending_output_tokens.copy()
+        # Clear pending tokens
+        self._pending_output_tokens.clear()
+        return self.spec_token_ids
     
     
     def get_pending_tokens(self) -> list[int]:
