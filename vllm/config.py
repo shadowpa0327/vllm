@@ -2377,6 +2377,21 @@ class SpeculativeConfig:
                                                   init=True)  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
+    enable_suffix_decoding: bool = False
+    """Whether to enable suffix decoding."""
+
+    suffix_cache_max_depth: int = 64
+    """The maximum depth of the suffix cache."""
+
+    suffix_max_spec_factor: float = 1.0
+    """The maximum speculative factor."""
+
+    suffix_max_spec_offset: float = 0.0
+    """The maximum speculative offset."""
+
+    suffix_min_token_prob: float = 0.1
+    """The minimum token probability."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2494,9 +2509,13 @@ class SpeculativeConfig:
             # draft related config as None here.
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
-        elif self.method == "self_specs" or self.method == "suffix":
+        elif self.method == "self_specs":
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
+        elif self.method == "suffix":
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+            self.num_speculative_tokens = self.suffix_cache_max_depth
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0

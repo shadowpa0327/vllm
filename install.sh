@@ -1,3 +1,5 @@
+# csrc/custom_ops可以忽略，不会用到
+
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv venv --python 3.12
