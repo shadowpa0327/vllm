@@ -62,6 +62,12 @@ from vllm.v1.request import SelfSpecState
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
 
+
+from vllm.common.suffix_cache import SuffixCache
+# from arctic_inference.patching import ArcticPatch
+# from arctic_inference.vllm.spec_dec.arctic_proposer import ArcticProposer
+from vllm.common.suffix_cache import SuffixSpecResult
+
 if TYPE_CHECKING:
     import xgrammar as xgr
 
@@ -169,6 +175,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.drafter = MedusaProposer(
                         vllm_config=self.vllm_config,
                         device=self.device)  # type: ignore
+                elif self.speculative_config.method == "suffix":
+                    pass
                 elif self.speculative_config.method == "self_specs":
                     pass
                 else:
@@ -1391,7 +1399,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.use_spec_decode:
             # Speculative decoding is not enabled.
             spec_token_ids = None
-        elif self.speculative_config.method == "self_specs":
+        elif self.speculative_config.method == "self_specs" or self.speculative_config.method == "suffix":
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
