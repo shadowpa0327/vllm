@@ -10,7 +10,7 @@ import torch
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
-os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
+# os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 from transformers import AutoTokenizer
 
@@ -32,7 +32,7 @@ def load_prompts(dataset_path, num_prompts):
             return []
     else:
         # Default prompts if dataset file doesn't exist
-        prompts = ["The future of AI is", "The future of technology is", "The mission of a PhD student is"]
+        prompts = ["The future of AI is", "The future of technology is", "The mission of a PhD student is"] * 100
     return prompts[:num_prompts]
 
 
@@ -45,12 +45,12 @@ def parse_args():
         default="./examples/data/gsm8k.jsonl",
         help="Path to dataset file",
     )
-    parser.add_argument("--max_num_seqs", type=int, default=4, help="Maximum number of sequences")
-    parser.add_argument("--num_prompts", type=int, default=4, help="Number of prompts to process")
+    parser.add_argument("--max_num_seqs", type=int, default=32, help="Maximum number of sequences")
+    parser.add_argument("--num_prompts", type=int, default=64, help="Number of prompts to process")
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--enforce_eager", action="store_true", help="Enforce eager execution")
     parser.add_argument("--enable_chunked_prefill", action="store_true", help="Enable chunked prefill")
-    parser.add_argument("--max_num_batched_tokens", type=int, default=2048, help="Maximum batched tokens")
+    parser.add_argument("--max_num_batched_tokens", type=int, default=8192, help="Maximum batched tokens")
     parser.add_argument("--temp", type=float, default=0, help="Sampling temperature")
     parser.add_argument("--enable_sspec", action="store_true", help="Enable self-speculative decoding")
     parser.add_argument("--enable_suffix", action="store_true", help="Enable self-speculative decoding")
@@ -74,8 +74,8 @@ def get_speculative_config(args):
         "method": "suffix",
         "model": None,
         "num_speculative_tokens": args.num_speculative_tokens,
-        "suffix_cache_max_depth": args.num_speculative_tokens * 8,
-        "disable_by_batch_size": 64,
+        "suffix_cache_max_depth": args.num_speculative_tokens,
+        "disable_by_batch_size": 1024,
         }
     return None
 
@@ -119,7 +119,7 @@ def main():
         "max_num_seqs": args.max_num_seqs,
         "gpu_memory_utilization": 0.8,
         "enable_prefix_caching": args.enable_prefix_caching,
-        "disable_log_stats": True,
+        "disable_log_stats": False,
         "block_size": 1, # NOTE(brian1009): Set to 1 to disable prefix caching
     }
     
@@ -137,17 +137,24 @@ def main():
 
     # Generate outputs
     print("Starting generation...")
-    llm.start_profile()
+    # llm.start_profile()
+    import time
+    start_time = time.time()
     outputs = llm.generate(prompt_token_ids=prompt_ids, sampling_params=sampling_params)
-    llm.stop_profile()
+    end_time = time.time()
+
+    # llm.stop_profile()
 
     # Print generated text
-    for i, output in enumerate(outputs):
-        print(f"\n{'='*60}")
-        print(f"Output {i+1}/{len(outputs)}")
-        print(f"{'='*60}")
-        print(f"Prompt: {output.prompt}")
-        print(f"Generated: {output.outputs[0].text}")
+    # for i, output in enumerate(outputs):
+    #     print(f"\n{'='*60}")
+    #     print(f"Output {i+1}/{len(outputs)}")
+    #     print(f"{'='*60}")
+    #     print(f"Prompt: {output.prompt}")
+    #     print(f"Generated: {output.outputs[0].text}")
+    
+    # with open('./time.txt', 'w') as f:
+    #     f.write(str(outputs[0].timestamps))
 
 
     print(type(llm.llm_engine))
@@ -155,6 +162,7 @@ def main():
     try:
         metrics = llm.get_metrics()
         print_metrics(metrics)
+        print(f"Generation time: {end_time - start_time} seconds") 
     except AssertionError:
         print("\nNo metrics available")
 
@@ -162,7 +170,7 @@ def main():
 def print_metrics(metrics):
     """Print self-speculative decoding metrics."""
     num_drafts = num_accepted = 0
-    acceptance_counts = [0] * 16  # Track acceptance at each position
+    acceptance_counts = [0] * 312 # Track acceptance at each position
     
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
