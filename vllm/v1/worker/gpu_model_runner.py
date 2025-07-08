@@ -45,7 +45,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.rejection_sampler import RejectionSampler, MAX_SPEC_LEN
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
@@ -77,7 +77,6 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
-
 
 class GPUModelRunner(LoRAModelRunnerMixin):
 
@@ -157,6 +156,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.use_spec_decode = False
         self.use_aux_hidden_state_outputs = False
+        self._suffix_cache = None
         if self.speculative_config:
             self.use_spec_decode = True
 
@@ -176,7 +176,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         vllm_config=self.vllm_config,
                         device=self.device)  # type: ignore
                 elif self.speculative_config.method == "suffix":
-                    pass
+                    self._suffix_cache = SuffixCache(
+                        self.speculative_config.suffix_cache_max_depth)
                 elif self.speculative_config.method == "self_specs":
                     pass
                 else:
@@ -184,10 +185,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                      f"{self.speculative_config.method}")
                 self.rejection_sampler = RejectionSampler()
 
-        self._suffix_cache = None
-        if self.speculative_config.method == "suffix":
-            self._suffix_cache = SuffixCache(
-                self.speculative_config.suffix_cache_max_depth)
+
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -404,7 +402,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
-
+x
         The updated states are used by the `_prepare_inputs` function to create
         the input GPU tensors for the model.
 
@@ -1482,8 +1480,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
         
-        disable_spec_decode = (
+        disable_suffix_decode = (
             self.speculative_config and
+            self.speculative_config.method == "suffix" and
             self.speculative_config.disable_by_batch_size and
             len(self.input_batch.req_ids) > self.speculative_config.disable_by_batch_size
         )
@@ -1492,7 +1491,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         orig_sampled_token_ids = valid_sampled_token_ids.copy()
         if self._suffix_cache is not None:
             self._update_suffix_cache(valid_sampled_token_ids)
-            if not disable_spec_decode:
+            if not disable_suffix_decode:
                 results = self.generate_draft_token_ids_suffix(
                     valid_sampled_token_ids)
                 suffix_spec_token_ids = []
@@ -1514,7 +1513,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     else:
                         suffix_spec_token_ids.append([])
 
-        if not self.use_spec_decode or disable_spec_decode:
+        if not self.use_spec_decode or disable_suffix_decode:
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "self_specs" or self.speculative_config.method == "suffix":
@@ -1626,18 +1625,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             spec_token_ids = draft_token_ids.tolist()
         
-
-        if spec_token_ids is None:
-            spec_token_ids = suffix_spec_token_ids
-        elif suffix_spec_token_ids is not None:
-            spec_token_ids = [
-                suffix_spec_token_ids[i] or spec_token_ids[i]
-                for i in range(len(suffix_spec_token_ids))
-            ]
+        # NOTE(siqi) 
+        if self.use_spec_decode and not disable_suffix_decode:
+            if spec_token_ids is None:
+                spec_token_ids = suffix_spec_token_ids
+            elif suffix_spec_token_ids is not None:
+                # NOTE(siqi): suffix_spec_token_ids is not None and spec_token_ids is not None
+                spec_token_ids = [
+                    suffix_spec_token_ids[i] or spec_token_ids[i]
+                    for i in range(len(suffix_spec_token_ids))
+                ]
+            print(f"spec_token_ids: {spec_token_ids}, suffix_spec_token_ids: {suffix_spec_token_ids}, valid_sampled_token_ids: {valid_sampled_token_ids}")
+        
+        if self.use_spec_decode and disable_suffix_decode and spec_token_ids is None:
+            # No speculative decoding is enabled.
+            spec_token_ids = [[]] * len(orig_sampled_token_ids)
 
         valid_sampled_token_ids = orig_sampled_token_ids
-
-
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():

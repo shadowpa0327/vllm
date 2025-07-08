@@ -2515,7 +2515,8 @@ class SpeculativeConfig:
         elif self.method == "suffix":
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
-            self.num_speculative_tokens = self.suffix_cache_max_depth
+            # NOTE(siqi) num_speculative_tokens ?? suffix_cache_max_depth
+            # self.num_speculative_tokens = self.suffix_cache_max_depth
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
@@ -2788,7 +2789,10 @@ class SpeculativeConfig:
         return self.method in ("eagle", "eagle3", "deepseek_mtp")
 
     def use_self_specs(self) -> bool:
-        return self.method == "self_specs"
+        return self.method == "self_specs" 
+
+    def use_suffix(self) -> bool:
+        return self.method == "suffix"
 
     def __repr__(self) -> str:
         method = self.method

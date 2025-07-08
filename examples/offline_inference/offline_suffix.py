@@ -29,11 +29,12 @@ if __name__ == '__main__':
         # quantization="fp8",
         tensor_parallel_size=1,
         speculative_config={
-            "method": "suffix",
-            "num_speculative_tokens": 3,
-            "model": None,
-            # "enable_suffix_decoding": True,
-            "disable_by_batch_size": 64,
+            "method": "self_specs",
+            "num_speculative_tokens": 4,
+            # "model": None,
+            # "suffix_cache_max_depth": 4,
+            # # "enable_suffix_decoding": True,
+            # "disable_by_batch_size": 64,
         },
         seed=0,
     )

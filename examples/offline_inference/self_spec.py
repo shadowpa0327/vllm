@@ -52,22 +52,32 @@ def parse_args():
     parser.add_argument("--enable_chunked_prefill", action="store_true", help="Enable chunked prefill")
     parser.add_argument("--max_num_batched_tokens", type=int, default=2048, help="Maximum batched tokens")
     parser.add_argument("--temp", type=float, default=0, help="Sampling temperature")
-    parser.add_argument("--enable_speculative", action="store_true", help="Enable self-speculative decoding")
-    parser.add_argument("--num_speculative_tokens", type=int, default=8, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--enable_sspec", action="store_true", help="Enable self-speculative decoding")
+    parser.add_argument("--enable_suffix", action="store_true", help="Enable self-speculative decoding")
+    parser.add_argument("--num_speculative_tokens", type=int, default=4, help="Number of speculative tokens for self-spec")
     parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching")
     return parser.parse_args()
 
 
 def get_speculative_config(args):
     """Get self-speculative decoding configuration based on arguments."""
-    if not args.enable_speculative:
-        return None
-    
-    return {
+    if args.enable_sspec and args.enable_suffix:
+        raise ValueError("Cannot enable both self-speculative and suffix decoding")
+    elif args.enable_sspec:
+        return {
         "method": "self_specs",
         "model": None,
         "num_speculative_tokens": args.num_speculative_tokens,
-    }
+        }
+    elif args.enable_suffix:
+        return {
+        "method": "suffix",
+        "model": None,
+        "num_speculative_tokens": args.num_speculative_tokens,
+        "suffix_cache_max_depth": args.num_speculative_tokens * 8,
+        "disable_by_batch_size": 64,
+        }
+    return None
 
 
 def main():
@@ -79,7 +89,7 @@ def main():
         torch.cuda.manual_seed_all(42)
     args = parse_args()
 
-    model_dir = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    model_dir = "/mnt/bn/siqi-sparse-rl/mnt/siqi_nas/HuggingFace-Download-Accelerator/hf_hub/models--Qwen--Qwen2.5-3B-Instruct"
     max_model_len = 2048
     # Load tokenizer and prepare prompts
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -123,6 +133,7 @@ def main():
     
     # Set up sampling parameters
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
+
 
     # Generate outputs
     print("Starting generation...")

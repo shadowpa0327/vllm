@@ -464,12 +464,12 @@ def rejection_greedy_sample_kernel(
                      target_argmax_id)
 
             #NOTE(brian1009): For debugging, we alwayse accepted a certain amount of tokens
-            if pos >= tl.cast(num_draft_tokens * 0.75, tl.int32):
-                rejected = True
-        
-            # if draft_token_id != target_argmax_id:
-            #     # Reject.
+            # if pos >= tl.cast(num_draft_tokens * 0.75, tl.int32):
             #     rejected = True
+        
+            if draft_token_id != target_argmax_id:
+                # Reject.
+                rejected = True
 
     if not rejected:
         # If all tokens are accepted, append the bonus token.
