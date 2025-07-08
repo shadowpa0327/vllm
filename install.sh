@@ -19,3 +19,5 @@ python setup1.py install
 
 export TORCH_CUDA_ARCH_LIST="8.9+PTX"
 python /mnt/bn/siqi-sparse-rl/mnt/siqi_nas/suffix_sspec/vllm-selfspec/examples/offline_inference/offline_suffix.py
+
+CUDA_VISIBLE_DEVICES=3 python /mnt/bn/siqi-sparse-rl/mnt/siqi_nas/suffix_sspec/vllm-selfspec/examples/offline_inference/self_spec.py --enable_suffix --enable_chunked_prefill
