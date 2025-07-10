@@ -1503,7 +1503,7 @@ x
                              else 0)
                 min_score = (0 if self.speculative_config.method == "suffix"
                              else self.speculative_config.num_speculative_tokens)
-                print(f"{min_score=}, {self.speculative_config.num_speculative_tokens=}")
+                #print(f"{min_score=}, {self.speculative_config.num_speculative_tokens=}")
                 for i, result in enumerate(results):
                     if result.score >= min_score:
                         # Use suffix decoded tokens, disable other speculation
@@ -1635,7 +1635,7 @@ x
                     suffix_spec_token_ids[i] or spec_token_ids[i]
                     for i in range(len(suffix_spec_token_ids))
                 ]
-            print(f"spec_token_ids: {spec_token_ids}, suffix_spec_token_ids: {suffix_spec_token_ids}, valid_sampled_token_ids: {valid_sampled_token_ids}")
+            #print(f"spec_token_ids: {spec_token_ids}, suffix_spec_token_ids: {suffix_spec_token_ids}, valid_sampled_token_ids: {valid_sampled_token_ids}")
         
         if self.use_spec_decode and disable_suffix_decode and spec_token_ids is None:
             # No speculative decoding is enabled.

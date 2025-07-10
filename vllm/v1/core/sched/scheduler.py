@@ -230,7 +230,6 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        print(f"{self.use_self_specs=}, {self.use_suffix=}")
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
             encoder_inputs_to_schedule = None
@@ -334,6 +333,7 @@ class Scheduler(SchedulerInterface):
                         num_draft_tokens=num_draft_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
+                    breakpoint()
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
