@@ -150,6 +150,10 @@ class Scheduler(SchedulerInterface):
             elif speculative_config.use_suffix():
                 self.self_spec_threshold = self.num_spec_tokens
                 self.use_suffix = True
+            elif speculative_config.use_self_specs_suffix():
+                self.self_spec_threshold = self.num_spec_tokens
+                self.use_suffix = True
+                self.use_self_specs = True
                 # FIXME(brian1009): Hardcoded for sparse attn.
                 self.recent_size = self.cache_config.recent_size
                 self.sink_size = self.cache_config.sink_size
@@ -181,11 +185,11 @@ class Scheduler(SchedulerInterface):
         return (request.self_spec_state == SelfSpecState.ACCUMULATING and 
                 len(request._pending_output_tokens) >= self.self_spec_threshold)
     
-    def should_start_suffix_verification(self, request: Request) -> bool:
-        """Check if a request should start verification based on scheduler's threshold"""
-        assert self.use_suffix
-        return (request.self_spec_state == SelfSpecState.ACCUMULATING and 
-                len(request._pending_output_tokens) >= self.self_spec_threshold)
+    # def should_start_suffix_verification(self, request: Request) -> bool:
+    #     """Check if a request should start verification based on scheduler's threshold"""
+    #     assert self.use_suffix
+    #     return (request.self_spec_state == SelfSpecState.ACCUMULATING and 
+    #             len(request._pending_output_tokens) >= self.self_spec_threshold)
 
 
     def schedule(self) -> SchedulerOutput:
@@ -252,24 +256,24 @@ class Scheduler(SchedulerInterface):
                 request.spec_token_ids = tokens_to_verify
                 num_new_tokens = len(tokens_to_verify)+1
                 num_draft_tokens = len(tokens_to_verify)
-            elif self.use_suffix and self.should_start_suffix_verification(request):
-                #print(f"Found Request:{request.request_id} that should start verification !")
-                # NOTE(brian1009): Adjust num_computed_tokens to exclude pending tokens
-                # The scheduler has been incrementing num_computed_tokens for pending tokens,
-                # but when we move them to spec_token_ids for verification, they should be
-                # considered "uncomputed" so the scheduler will schedule them for verification
-                num_scheduled_pending_output_tokens = request.num_tokens - request.num_computed_tokens
-                request.num_computed_tokens += (num_scheduled_pending_output_tokens - len(request._pending_output_tokens))
-                request.num_computed_tokens -= 1 # NOTE(brian1009) Fall back one token. 
-                # Transition to verification state and get tokens to verify
-                tokens_to_verify = request.start_suffix_verification()
-                # During the verification, we use full KV indices. Hence, we cleanup the sparse_selected_kv_indices
-                self.req_to_sparse_selected_kv_indices[request.request_id] = []
-                self.req_to_full_kv_start_offset[request.request_id] = 0
-                # Reuse the existing spec decoding interface
-                request.spec_token_ids = tokens_to_verify
-                num_new_tokens = len(tokens_to_verify)+1
-                num_draft_tokens = len(tokens_to_verify)
+            # elif self.use_suffix and self.should_start_suffix_verification(request):
+            #     #print(f"Found Request:{request.request_id} that should start verification !")
+            #     # NOTE(brian1009): Adjust num_computed_tokens to exclude pending tokens
+            #     # The scheduler has been incrementing num_computed_tokens for pending tokens,
+            #     # but when we move them to spec_token_ids for verification, they should be
+            #     # considered "uncomputed" so the scheduler will schedule them for verification
+            #     num_scheduled_pending_output_tokens = request.num_tokens - request.num_computed_tokens
+            #     request.num_computed_tokens += (num_scheduled_pending_output_tokens - len(request._pending_output_tokens))
+            #     request.num_computed_tokens -= 1 # NOTE(brian1009) Fall back one token. 
+            #     # Transition to verification state and get tokens to verify
+            #     tokens_to_verify = request.start_suffix_verification()
+            #     # During the verification, we use full KV indices. Hence, we cleanup the sparse_selected_kv_indices
+            #     self.req_to_sparse_selected_kv_indices[request.request_id] = []
+            #     self.req_to_full_kv_start_offset[request.request_id] = 0
+            #     # Reuse the existing spec decoding interface
+            #     request.spec_token_ids = tokens_to_verify
+            #     num_new_tokens = len(tokens_to_verify)+1
+            #     num_draft_tokens = len(tokens_to_verify)
             else:
                 #NOTE(This part handled the partial prefill scheduling)
                 num_new_tokens = (request.num_tokens_with_spec -
@@ -857,10 +861,10 @@ class Scheduler(SchedulerInterface):
                     # Flush the processed spec_token_ids
                     request.spec_token_ids = []
                     request.self_spec_state = SelfSpecState.NORMAL
-                elif self.use_suffix and request.self_spec_state == SelfSpecState.VERIFYING:
-                    # Flush the processed spec_token_ids
-                    request.spec_token_ids = []
-                    request.self_spec_state = SelfSpecState.NORMAL
+                # elif self.use_suffix and request.self_spec_state == SelfSpecState.VERIFYING:
+                #     # Flush the processed spec_token_ids
+                #     request.spec_token_ids = []
+                #     request.self_spec_state = SelfSpecState.NORMAL
                 
                 # Update spec decoding stats (unified for both types)
                 spec_decoding_stats = self.make_spec_decoding_stats(
@@ -907,8 +911,8 @@ class Scheduler(SchedulerInterface):
                     # we should not flip the state. Always keep the state as NORMAL.
                     if self.use_self_specs:
                         flip_from_normal_to_accumulating = True
-                    elif self.use_suffix:
-                        flip_from_normal_to_accumulating = True
+                    # elif self.use_suffix:
+                    #     flip_from_normal_to_accumulating = True
                 else:
                     breakpoint()
                     raise ValueError(f"During update_from_output, the request is in an invalid state: {request.self_spec_state}. Should be either ACCUMULATING or NORMAL.")
