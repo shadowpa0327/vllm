@@ -10,7 +10,6 @@ import torch
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
-# os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 from transformers import AutoTokenizer
 
@@ -77,6 +76,14 @@ def get_speculative_config(args):
         "suffix_cache_max_depth": args.num_speculative_tokens,
         "disable_by_batch_size": 1024,
         }
+    elif args.enable_self_specs_suffix:
+        return {
+            "method": "self_specs_suffix",
+            "model": None,
+            "num_speculative_tokens": args.num_speculative_tokens,
+            "suffix_cache_max_depth": 4,
+            "disable_by_batch_size": 1024,
+    }
     return None
 
 
@@ -146,12 +153,12 @@ def main():
     # llm.stop_profile()
 
     # Print generated text
-    # for i, output in enumerate(outputs):
-    #     print(f"\n{'='*60}")
-    #     print(f"Output {i+1}/{len(outputs)}")
-    #     print(f"{'='*60}")
-    #     print(f"Prompt: {output.prompt}")
-    #     print(f"Generated: {output.outputs[0].text}")
+    for i, output in enumerate(outputs):
+        print(f"\n{'='*60}")
+        print(f"Output {i+1}/{len(outputs)}")
+        print(f"{'='*60}")
+        print(f"Prompt: {output.prompt}")
+        print(f"Generated: {output.outputs[0].text}")
     
     # with open('./time.txt', 'w') as f:
     #     f.write(str(outputs[0].timestamps))

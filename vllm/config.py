@@ -2267,7 +2267,7 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
-                            "draft_model", "deepseek_mtp", "self_specs", "suffix"]
+                            "draft_model", "deepseek_mtp", "self_specs", "suffix", "self_specs_suffix"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -2377,9 +2377,6 @@ class SpeculativeConfig:
                                                   init=True)  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
-    enable_suffix_decoding: bool = False
-    """Whether to enable suffix decoding."""
-
     suffix_cache_max_depth: int = 64
     """The maximum depth of the suffix cache."""
 
@@ -2465,6 +2462,8 @@ class SpeculativeConfig:
             elif self.method == "self_specs":
                 self.model = None
             elif self.method == "suffix":
+                self.model = None
+            elif self.model == "self_specs_suffix":
                 self.model = None
             else:
                 raise ValueError("num_speculative_tokens was provided without "
@@ -2793,6 +2792,9 @@ class SpeculativeConfig:
 
     def use_suffix(self) -> bool:
         return self.method == "suffix"
+    
+    def use_self_specs_suffix(self) -> bool:
+        return self.method == "self_specs_suffix"
 
     def __repr__(self) -> str:
         method = self.method

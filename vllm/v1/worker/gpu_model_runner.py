@@ -180,6 +180,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.speculative_config.suffix_cache_max_depth)
                 elif self.speculative_config.method == "self_specs":
                     pass
+                elif self.speculative_config.method == "self_specs_suffix":
+                    self._suffix_cache = SuffixCache(
+                        self.speculative_config.suffix_cache_max_depth)
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
