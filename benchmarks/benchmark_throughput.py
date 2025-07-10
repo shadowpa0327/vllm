@@ -37,7 +37,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 from vllm.v1.metrics.reader import Counter, Vector
-
+import os 
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 def print_metrics(metrics):
     """Print self-speculative decoding metrics."""
@@ -71,15 +72,27 @@ def print_metrics(metrics):
                 print(f"  Position {i}: {rate:.3f} ({acceptance_counts[i]}/{num_drafts})")
 
 
-def get_speculative_config(args, tokens):
+def get_speculative_config(suffix, tokens):
     """Get self-speculative decoding configuration based on arguments."""
+    
+    if suffix:
+        cfg = {
+            "method": "suffix",
+            "model": None,
+            "num_speculative_tokens": tokens,
+            "suffix_cache_max_depth": 6,
+            "disable_by_batch_size": 1024,
+        }
+    else:
+        cfg = {
+            "method": "self_specs",
+            "model": None,
+            "num_speculative_tokens": tokens,
+        }
+        
+    return cfg
 
-    return {
-        "method": "self_specs",
-        "model": None,
-        "num_speculative_tokens": tokens,
-    }
-
+    
 
 def run_vllm(
     requests: list[SampleRequest],
@@ -88,22 +101,26 @@ def run_vllm(
     disable_detokenize: bool = False,
     use_self_spec: bool = True,
     spec_tokens: int = 4,
+    use_suffix: bool = False,
 ) -> tuple[float, Optional[list[RequestOutput]]]:
     from vllm import LLM, SamplingParams
     
     engine_args.block_size = 1
     engine_args.enable_prefix_caching = False
     engine_args.disable_log_stats = True
+    #engine_args.max_num_batched_tokens = 2048
+    engine_args.max_num_seqs = 64
+    engine_args.gpu_memory_utilization = 0.95
     # Get speculative config
     if use_self_spec:
         engine_args.block_size = 1
-        engine_args.enable_prefix_caching = True
-        speculative_config = get_speculative_config(engine_args, spec_tokens)
+        engine_args.enable_prefix_caching = False
+        speculative_config = get_speculative_config(use_suffix, spec_tokens)
 
     
         if speculative_config is not None:
             engine_args.speculative_config = speculative_config
-            print(f"Using self-speculative decoding with {speculative_config['num_speculative_tokens']} tokens")
+            print(f"Using self-speculative decoding with {speculative_config['num_speculative_tokens']} tokens. Suffix {use_suffix}")
         else:
             print("Self-speculative decoding disabled")
 
@@ -131,14 +148,13 @@ def run_vllm(
                 prompt=request.prompt, multi_modal_data=request.multi_modal_data
             )
         )
-        print(request.expected_output_len)
         sampling_params.append(
             SamplingParams(
                 n=n,
                 temperature=0.0,
                 top_p=1.0,
                 ignore_eos=True,
-                max_tokens=6144,
+                max_tokens=7168,
                 detokenize=not disable_detokenize,
             )
         )
@@ -279,7 +295,7 @@ async def run_vllm_async(
                     temperature=1.0,
                     top_p=1.0,
                     ignore_eos=True,
-                    max_tokens=request.expected_output_len,
+                    max_tokens=6144,
                     detokenize=not disable_detokenize,
                 )
             )
@@ -495,7 +511,8 @@ def main(args: argparse.Namespace, use_self_spec, spec_tokens):
                 EngineArgs.from_cli_args(args),
                 args.disable_detokenize,
                 use_self_spec,
-                spec_tokens
+                spec_tokens,
+                args.suffix,
             )
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -530,6 +547,7 @@ def main(args: argparse.Namespace, use_self_spec, spec_tokens):
             total_prompt_tokens += (
                 len(ro.prompt_token_ids) if ro.prompt_token_ids else 0
             )
+            print("total_output_tokens", sum(len(o.token_ids) for o in ro.outputs if o))
             total_output_tokens += sum(len(o.token_ids) for o in ro.outputs if o)
         total_num_tokens = total_prompt_tokens + total_output_tokens
     else:
@@ -805,6 +823,7 @@ if __name__ == "__main__":
     parser.add_argument("--enable-speculative", action="store_true", help="Enable self-speculative decoding")
     
     parser.add_argument("--num-speculative-tokens", type=int, default=8, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--suffix", action="store_true", help="Enable suffix cache")
     #parser.add_argument("--sink-size", type=int, default=8, help="Number of speculative tokens for self-spec")
     #parser.add_argument("--recent-size", type=int, default=128, help="Number of speculative tokens for self-spec")
 

@@ -12,12 +12,12 @@ uv pip install -e .
 
 uv pip install --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc"
 
-# 安装suffix tree 到vllm-selfspec/build/lib.linux-x86_64-cpython-311/arctic_inference/common/suffix_cache/_C.cpython-311-x86_64-linux-gnu.so
-python setup1.py install
-# from arctic_inference.common.suffix_cache._C import SuffixTree, Candidate
-# see vllm-selfspec/test.py
+# # 安装suffix tree 到vllm-selfspec/build/lib.linux-x86_64-cpython-311/arctic_inference/common/suffix_cache/_C.cpython-311-x86_64-linux-gnu.so
+# python setup1.py install
+# # from arctic_inference.common.suffix_cache._C import SuffixTree, Candidate
+# # see vllm-selfspec/test.py
 
-export TORCH_CUDA_ARCH_LIST="8.9+PTX"
-python /mnt/bn/siqi-sparse-rl/mnt/siqi_nas/suffix_sspec/vllm-selfspec/examples/offline_inference/offline_suffix.py
+# export TORCH_CUDA_ARCH_LIST="8.9+PTX"
+# python /mnt/bn/siqi-sparse-rl/mnt/siqi_nas/suffix_sspec/vllm-selfspec/examples/offline_inference/offline_suffix.py
 
-CUDA_VISIBLE_DEVICES=3 python /mnt/bn/siqi-sparse-rl/mnt/siqi_nas/suffix_sspec/vllm-selfspec/examples/offline_inference/self_spec.py --enable_suffix --enable_chunked_prefill
+# CUDA_VISIBLE_DEVICES=3 python /mnt/bn/siqi-sparse-rl/mnt/siqi_nas/suffix_sspec/vllm-selfspec/examples/offline_inference/self_spec.py --enable_suffix --enable_chunked_prefill

@@ -287,7 +287,7 @@ class FlashInferMetadataBuilder:
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
+                self._get_workspace_buffer(), "NHD", backend='fa2')
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
@@ -573,13 +573,6 @@ class FlashInferMetadataBuilder:
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
         # print("================================================")
-        # print(f"num_prefills: {self._num_prefills}")
-        # print(f"num_decodes: {self._num_decodes}")
-        # print(f"num_prefill_tokens: {self._num_prefill_tokens}")
-        # print(f"num_decode_tokens: {self._num_decode_tokens}")
-        # print(f"num_actual_tokens: {num_actual_tokens}")
-        # print(f"num_reqs: {num_reqs}")
-        # print(f"num_selected_kv_indices: {len_selected_kv_indices_tensor}")
         # print("================================================")
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
