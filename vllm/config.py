@@ -2463,7 +2463,7 @@ class SpeculativeConfig:
                 self.model = None
             elif self.method == "suffix":
                 self.model = None
-            elif self.model == "self_specs_suffix":
+            elif self.method == "self_specs_suffix":
                 self.model = None
             else:
                 raise ValueError("num_speculative_tokens was provided without "

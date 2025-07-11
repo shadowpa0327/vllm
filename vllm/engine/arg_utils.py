@@ -1346,14 +1346,27 @@ class EngineArgs:
                     is_self_specs_enabled = True
                 elif speculative_method == "suffix":
                     is_suffix_enabled = True
+                elif speculative_method == "self_specs_suffix":
+                    is_self_specs_suffix_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")
                 if speculative_model in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled or is_self_specs_enabled or is_suffix_enabled):
+            # Check if none of the supported speculative decoding methods are enabled
+            supported_methods_enabled = (
+                is_ngram_enabled
+                or is_eagle_enabled
+                or is_medusa_enabled
+                or is_self_specs_enabled
+                or is_suffix_enabled
+                or is_self_specs_suffix_enabled
+            )
+            if not supported_methods_enabled:
                 # Other speculative decoding methods are not supported yet.
-                _raise_or_fallback(feature_name="Speculative Decoding",
-                                   recommend_to_remove=False)
+                _raise_or_fallback(
+                    feature_name="Speculative Decoding",
+                    recommend_to_remove=False
+                )
                 return False
 
         # No XFormers so far.

@@ -224,7 +224,7 @@ class EngineCore:
             )
         #breakpoint()
         scheduler_output = self.scheduler.schedule()
-        print("Scheduler Output:", scheduler_output)
+        #print("Scheduler Output:", scheduler_output)
         #breakpoint()
         model_output = self.execute_model(scheduler_output)
         #print("Start Update from Output")
