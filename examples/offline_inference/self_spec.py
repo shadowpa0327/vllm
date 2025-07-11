@@ -1,3 +1,6 @@
+
+
+
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import json
@@ -5,11 +8,15 @@ import os
 import random
 import numpy as np
 import torch
+import sys
+sys.path.append("benchmarks")
 
+from benchmark_dataset import AIMODataset
 # Set environment variables
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
+os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 from transformers import AutoTokenizer
 
@@ -17,34 +24,65 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
 
-def load_prompts(dataset_path, num_prompts):
-    """Load prompts from dataset file or use default prompts."""
-    if os.path.exists(dataset_path):
+
+def load_prompts(args, tokenizer):
+    """Load prompts based on dataset name."""
+    dataset_name = args.dataset_name
+
+    if dataset_name == "debug":
+        prompts = [
+            "The future of AI is", "The future of technology is",
+            "The mission of a PhD student is"
+        ]
+        return prompts[:args.num_prompts]
+
+    if dataset_name == "aimo":
+        dataset_path = "AI-MO/aimo-validation-aime"
+        input_requests = AIMODataset(
+            dataset_path=dataset_path,
+            dataset_subset=None,
+            dataset_split="train",
+            random_seed=42,
+        ).sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=None,
+        )
+        prompts = [req.prompt for req in input_requests]
+        return prompts
+
+    if dataset_name == "cropped_aimo":
+        if not args.input_file:
+            raise ValueError(
+                "An input file must be provided for the cropped_aimo dataset.")
         prompts = []
-        try:
-            with open(dataset_path) as f:
-                for line in f:
-                    data = json.loads(line)
-                    prompts.append(data["question"])
-        except Exception as e:
-            print(f"Error reading dataset: {e}")
-            return []
-    else:
-        # Default prompts if dataset file doesn't exist
-        prompts = ["The future of AI is", "The future of technology is", "The mission of a PhD student is"] * 100
-    return prompts[:num_prompts]
+        with open(args.input_file, "r") as f:
+            for line in f:
+                entry = json.loads(line)
+                prompt_ids = tokenizer.apply_chat_template([{"role": "user", "content": "Solve the following math problem step-by-step. " + entry["prompt"]}], 
+                add_generation_prompt=True)
+                generated_text = "\n\n" + entry["generated_text"]
+                generated_text_ids = tokenizer.encode(generated_text)
+                if len(prompt_ids) + len(generated_text_ids) < 4096:
+                    continue
+                prompt_with_partial_output = prompt_ids + generated_text_ids[:4096-len(prompt_ids)]
+                prompts.append(prompt_with_partial_output)
+        return prompts[:args.num_prompts]
+
+    raise ValueError(f"Unknown dataset name: {dataset_name}")
 
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Self-speculative decoding inference script")
     parser.add_argument(
-        "--dataset",
+        "--dataset_name",
         type=str,
-        default="./examples/data/gsm8k.jsonl",
-        help="Path to dataset file",
+        default="debug",
+        choices=["debug", "aimo", "cropped_aimo"],
+        help="Name of the dataset to use.",
     )
-    parser.add_argument("--max_num_seqs", type=int, default=32, help="Maximum number of sequences")
+    parser.add_argument("--max_num_seqs", type=int, default=64, help="Maximum number of sequences")
     parser.add_argument("--num_prompts", type=int, default=64, help="Number of prompts to process")
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--enforce_eager", action="store_true", help="Enforce eager execution")
@@ -52,9 +90,16 @@ def parse_args():
     parser.add_argument("--max_num_batched_tokens", type=int, default=8192, help="Maximum batched tokens")
     parser.add_argument("--temp", type=float, default=0, help="Sampling temperature")
     parser.add_argument("--enable_sspec", action="store_true", help="Enable self-speculative decoding")
-    parser.add_argument("--enable_suffix", action="store_true", help="Enable self-speculative decoding")
-    parser.add_argument("--num_speculative_tokens", type=int, default=4, help="Number of speculative tokens for self-spec")
+    parser.add_argument("--enable_suffix", action="store_true", help="Enable suffix decoding")
+    parser.add_argument("--enable_sspec_suffix", action='store_true', help="Enable suffix + self-spec hybrid spec decoding")
+    parser.add_argument("--num_speculative_tokens", type=int, default=16, help="Number of speculative tokens for self-spec")
     parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--disable_log_stats", action="store_true", help="Disable log stats")
+    parser.add_argument(
+        "--input-file",
+        type=str,
+        help="File to read prompts from for the cropped_aimo dataset.")
     return parser.parse_args()
 
 
@@ -72,17 +117,17 @@ def get_speculative_config(args):
         return {
         "method": "suffix",
         "model": None,
-        "num_speculative_tokens": args.num_speculative_tokens,
-        "suffix_cache_max_depth": args.num_speculative_tokens,
+        "num_speculative_tokens": 8,
+        "suffix_cache_max_depth": 8,
         "disable_by_batch_size": 1024,
         }
-    elif args.enable_self_specs_suffix:
+    elif args.enable_sspec_suffix:
         return {
-            "method": "self_specs_suffix",
-            "model": None,
-            "num_speculative_tokens": args.num_speculative_tokens,
-            "suffix_cache_max_depth": 4,
-            "disable_by_batch_size": 1024,
+        "method": "self_specs_suffix",
+        "model": None,
+        "num_speculative_tokens": args.num_speculative_tokens,
+        "suffix_cache_max_depth": 6,
+        "disable_by_batch_size": 1024,
     }
     return None
 
@@ -96,20 +141,27 @@ def main():
         torch.cuda.manual_seed_all(42)
     args = parse_args()
 
-    model_dir = "/mnt/bn/siqi-sparse-rl/mnt/siqi_nas/HuggingFace-Download-Accelerator/hf_hub/models--Qwen--Qwen2.5-3B-Instruct"
-    max_model_len = 2048
+    model_dir = "/root/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-R1-Distill-Llama-8B/snapshots/6a6f4aa4197940add57724a7707d069478df56b1"
+    max_model_len = 16384
     # Load tokenizer and prepare prompts
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    prompts = load_prompts(args.dataset, args.num_prompts)
+    prompts = load_prompts(args, tokenizer)
     
     print(f"Loaded {len(prompts)} prompts")
     
-    prompt_ids = [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}], add_generation_prompt=True
-        )
-        for prompt in prompts
-    ]
+    if args.dataset_name == "cropped_aimo":
+        prompt_ids = prompts
+        # prompt_ids = [
+        #     tokenizer.encode(prompt)
+        #     for prompt in prompts
+        # ]
+        # print(f"Prompt: {prompts[0]}")
+        # print(f"Prompt IDs: {prompt_ids[0]}")
+    else:
+        prompt_ids = [
+            tokenizer.apply_chat_template([{"role": "user", "content": "Solve the following math problem step-by-step. " + prompt}], add_generation_prompt=True)
+            for prompt in prompts
+        ]
 
     # Get speculative config
     speculative_config = get_speculative_config(args)
@@ -124,9 +176,9 @@ def main():
         "enforce_eager": args.enforce_eager,
         "max_model_len": max_model_len,
         "max_num_seqs": args.max_num_seqs,
-        "gpu_memory_utilization": 0.8,
+        "gpu_memory_utilization": 0.9,
         "enable_prefix_caching": args.enable_prefix_caching,
-        "disable_log_stats": False,
+        "disable_log_stats": args.disable_log_stats,
         "block_size": 1, # NOTE(brian1009): Set to 1 to disable prefix caching
     }
     
@@ -139,39 +191,125 @@ def main():
     llm = LLM(**llm_kwargs)
     
     # Set up sampling parameters
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=128, top_p=1.0, ignore_eos=True)
 
 
     # Generate outputs
     print("Starting generation...")
-    # llm.start_profile()
     import time
     start_time = time.time()
+    #llm.start_profile()
     outputs = llm.generate(prompt_token_ids=prompt_ids, sampling_params=sampling_params)
+    #llm.stop_profile()
     end_time = time.time()
-
-    # llm.stop_profile()
+    print(f"Generation time: {end_time - start_time} seconds") 
 
     # Print generated text
-    for i, output in enumerate(outputs):
-        print(f"\n{'='*60}")
-        print(f"Output {i+1}/{len(outputs)}")
-        print(f"{'='*60}")
-        print(f"Prompt: {output.prompt}")
-        print(f"Generated: {output.outputs[0].text}")
-    
-    # with open('./time.txt', 'w') as f:
-    #     f.write(str(outputs[0].timestamps))
+    if args.verbose:
+
+        # print model outputs
+        for i, (prompt, output) in enumerate(zip(prompts, outputs)):
+            print(f"\n{'='*60}")
+            print(f"Output {i+1}/{len(outputs)}")
+            print(f"{'='*60}")
+            generated_text = output.outputs[0].text
+            generated_ids = output.outputs[0].token_ids
+            prompt_ids = output.prompt_token_ids
+            finish_reason = output.outputs[0].finish_reason
+
+            print(f"Prompt: {prompt}")
+            print(f"Generated: {generated_text}")
+            print(f"Prompt length: {len(prompt_ids)}")
+            print(f"Generated length: {len(generated_ids)}")
+            print(f"Finish Reason: {finish_reason}")
 
 
-    print(type(llm.llm_engine))
-    # Print metrics if available
-    try:
-        metrics = llm.get_metrics()
-        print_metrics(metrics)
-        print(f"Generation time: {end_time - start_time} seconds") 
-    except AssertionError:
-        print("\nNo metrics available")
+         # Print metrics if available
+        try:
+            metrics = llm.get_metrics()
+        # Display self-spec request state statistics
+            print("\n" + "="*80)
+            print("SELF-SPEC REQUEST STATE STATISTICS")
+            print("="*80)
+            
+            total_tokens_history = llm.llm_engine.stat_logger.total_scheduled_tokens_history
+            total_reqs_history = llm.llm_engine.stat_logger.num_scheduled_reqs_history
+            accumulating_history = llm.llm_engine.stat_logger.num_cached_reqs_in_accumulating_history
+            verifying_history = llm.llm_engine.stat_logger.num_cached_reqs_in_verifying_history
+            
+            print(f"Total iterations recorded: {len(total_reqs_history)}")
+            print()
+            
+            # Calculate summary statistics
+            if total_reqs_history:
+                total_tokens_sum = sum(total_tokens_history)
+                total_reqs_sum = sum(total_reqs_history)
+                accumulating_sum = sum(accumulating_history)
+                verifying_sum = sum(verifying_history)
+                
+                print("SUMMARY STATISTICS:")
+                print(f"  Total scheduled tokens across all iterations: {total_tokens_sum:,}")
+                print(f"  Total scheduled requests across all iterations: {total_reqs_sum:,}")
+                print(f"  Total accumulating requests: {accumulating_sum:,}")
+                print(f"  Total verifying requests: {verifying_sum:,}")
+                print()
+                
+                # Calculate average per iteration
+                avg_tokens = total_tokens_sum / len(total_tokens_history)
+                avg_reqs = total_reqs_sum / len(total_reqs_history)
+                avg_accumulating = accumulating_sum / len(accumulating_history)
+                avg_verifying = verifying_sum / len(verifying_history)
+                
+                print("AVERAGE PER ITERATION:")
+                print(f"  Avg scheduled tokens: {avg_tokens:.2f}")
+                print(f"  Avg scheduled requests: {avg_reqs:.2f}")
+                print(f"  Avg accumulating requests: {avg_accumulating:.2f}")
+                print(f"  Avg verifying requests: {avg_verifying:.2f}")
+                print()
+            
+            # Show iteration-by-iteration breakdown (first 10 and last 10 iterations)
+            print("ITERATION-BY-ITERATION BREAKDOWN:")
+            print(f"{'Iter':<6} {'Tokens':<8} {'Total':<7} {'Accum':<7} {'Verify':<8} {'Normal':<8} {'Accum%':<8} {'Verify%':<9} {'Normal%':<8}")
+            print("-" * 80)
+            
+            # Show first 10 iterations
+            show_iterations = min(10, len(total_reqs_history))
+            for i in range(show_iterations):
+                tokens = total_tokens_history[i]
+                total_reqs = total_reqs_history[i]
+                accumulating = accumulating_history[i]
+                verifying = verifying_history[i]
+                normal = total_reqs - accumulating - verifying
+                
+                accum_pct = (accumulating / total_reqs * 100) if total_reqs > 0 else 0
+                verify_pct = (verifying / total_reqs * 100) if total_reqs > 0 else 0
+                normal_pct = (normal / total_reqs * 100) if total_reqs > 0 else 0
+                
+                print(f"{i+1:<6} {tokens:<8} {total_reqs:<7} {accumulating:<7} {verifying:<8} {normal:<8} {accum_pct:<7.1f}% {verify_pct:<8.1f}% {normal_pct:<7.1f}%")
+            
+            # Show last 10 iterations if there are more than 10 total
+            if len(total_reqs_history) > 10:
+                # if len(total_reqs_history) > 20:
+                #     print("  ...")
+                #start_idx = max(10, len(total_reqs_history) - 10)
+                start_idx = 10
+                for i in range(start_idx, len(total_reqs_history)):
+                    tokens = total_tokens_history[i]
+                    total_reqs = total_reqs_history[i]
+                    accumulating = accumulating_history[i]
+                    verifying = verifying_history[i]
+                    normal = total_reqs - accumulating - verifying
+                    
+                    accum_pct = (accumulating / total_reqs * 100) if total_reqs > 0 else 0
+                    verify_pct = (verifying / total_reqs * 100) if total_reqs > 0 else 0
+                    normal_pct = (normal / total_reqs * 100) if total_reqs > 0 else 0
+                    
+                    print(f"{i+1:<6} {tokens:<8} {total_reqs:<7} {accumulating:<7} {verifying:<8} {normal:<8} {accum_pct:<7.1f}% {verify_pct:<8.1f}% {normal_pct:<7.1f}%")
+            
+            print("="*80)
+            print_metrics(metrics)
+        except AssertionError:
+            print("\nNo metrics available")
 
 
 def print_metrics(metrics):
@@ -208,3 +346,4 @@ def print_metrics(metrics):
 
 if __name__ == "__main__":
     main()
+

@@ -373,7 +373,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_spec_factor=max_spec_factor,
                 max_spec_offset=max_spec_offset,
                 min_token_prob=config.suffix_min_token_prob)
-
             results.append(result)
 
         return results
@@ -1501,11 +1500,11 @@ x
                 # The score is an estimate of the acceptance length. Thus, the
                 # heuristic is to use the suffix decoded tokens if the score is
                 # greater than the # of tokens we would speculate otherwise.
-                min_score = (self.speculative_config.num_speculative_tokens
-                             if self.speculative_config.method != "suffix"
-                             else 0)
-                min_score = (0 if self.speculative_config.method == "suffix"
-                             else self.speculative_config.num_speculative_tokens)
+
+                if self.speculative_config.method in ["suffix", "self_specs_suffix"]:
+                    min_score = 0
+                else:
+                    min_score = self.speculative_config.num_speculative_tokens
                 #print(f"{min_score=}, {self.speculative_config.num_speculative_tokens=}")
                 for i, result in enumerate(results):
                     if result.score >= min_score:
@@ -1519,7 +1518,10 @@ x
         if not self.use_spec_decode or disable_suffix_decode:
             # Speculative decoding is not enabled.
             spec_token_ids = None
-        elif self.speculative_config.method == "self_specs" or self.speculative_config.method == "suffix":
+        elif (  self.speculative_config.method == "self_specs" 
+                or self.speculative_config.method == "suffix"
+                or self.speculative_config.method == "self_specs_suffix"
+            ):
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
