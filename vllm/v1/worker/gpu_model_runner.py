@@ -63,10 +63,10 @@ from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
 
 
-from vllm.common.suffix_cache import SuffixCache
+#from vllm.common.suffix_cache import SuffixCache
 # from arctic_inference.patching import ArcticPatch
 # from arctic_inference.vllm.spec_dec.arctic_proposer import ArcticProposer
-from vllm.common.suffix_cache import SuffixSpecResult
+#from vllm.common.suffix_cache import SuffixSpecResult
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -176,11 +176,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         vllm_config=self.vllm_config,
                         device=self.device)  # type: ignore
                 elif self.speculative_config.method == "suffix":
+                    #FIXME Fix instantiation of SuffixCache(brian1009)
+                    raise NotImplementedError("Suffix cache is not supported")
                     self._suffix_cache = SuffixCache(
                         self.speculative_config.suffix_cache_max_depth)
                 elif self.speculative_config.method == "self_specs":
                     pass
                 elif self.speculative_config.method == "self_specs_suffix":
+                    #FIXME Fix instantiation of SuffixCache(brian1009)
+                    raise NotImplementedError("Suffix cache is not supported")
                     self._suffix_cache = SuffixCache(
                         self.speculative_config.suffix_cache_max_depth)
                 else:
