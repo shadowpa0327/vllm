@@ -77,6 +77,8 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_size: int,
+        recent_size: int = 128,
+        sink_size: int = 32,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -113,9 +115,10 @@ class InputBatch:
 
         # Selective KV indices buffers
         # Similar to token_ids_cpu, this stores selective KV indices for each request
-        # We use max_model_len as the max possible number of indices per request
+        # Buffer size is sink_size + recent_size for streaming LLM sparse attention
+        max_selective_kv_indices = sink_size + recent_size
         self.selective_kv_indices_cpu_tensor = torch.zeros(
-            (max_num_reqs, 512), #FIXME(brian1009): hardcoded for now
+            (max_num_reqs, max_selective_kv_indices),
             device="cpu",
             dtype=torch.int32,
             pin_memory=False,

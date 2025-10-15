@@ -192,8 +192,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                      f"{self.speculative_config.method}")
                 self.rejection_sampler = RejectionSampler()
 
-
-
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
 
@@ -205,6 +203,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_size=self.cache_config.block_size,
+            recent_size=self.cache_config.recent_size,
+            sink_size=self.cache_config.sink_size,
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level

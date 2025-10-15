@@ -954,8 +954,7 @@ class Scheduler(SchedulerInterface):
                 # check above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
-
-            #NOTE(brian1009): Comment this for now.
+                
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
                 if self.structured_output_manager.should_advance(request):

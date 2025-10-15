@@ -96,6 +96,8 @@ def parse_args():
     parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--disable_log_stats", action="store_true", help="Disable log stats")
+    parser.add_argument("--recent_size", type=int, default=128, help="Number of recent tokens to keep for sparse attention (default: 128)")
+    parser.add_argument("--sink_size", type=int, default=32, help="Number of sink tokens to keep for sparse attention (default: 32)")
     parser.add_argument(
         "--input-file",
         type=str,
@@ -180,18 +182,21 @@ def main():
         "enable_prefix_caching": args.enable_prefix_caching,
         "disable_log_stats": args.disable_log_stats,
         "block_size": 1, # NOTE(brian1009): Set to 1 to disable prefix caching
+        "recent_size": args.recent_size,
+        "sink_size": args.sink_size,
     }
     
     if speculative_config is not None:
         llm_kwargs["speculative_config"] = speculative_config
         print(f"Using self-speculative decoding with {speculative_config['num_speculative_tokens']} tokens")
+        print(f"Sparse attention config: sink_size={args.sink_size}, recent_size={args.recent_size}")
     else:
         print("Self-speculative decoding disabled")
 
     llm = LLM(**llm_kwargs)
     
     # Set up sampling parameters
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=2048, top_p=1.0, ignore_eos=True)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=16384, top_p=1.0, ignore_eos=True)
 
 
     # Generate outputs
