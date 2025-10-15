@@ -141,7 +141,7 @@ def main():
         torch.cuda.manual_seed_all(42)
     args = parse_args()
 
-    model_dir = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    model_dir = "meta-llama/Meta-Llama-3.1-8B-Instruct"
     max_model_len = 16384
     # Load tokenizer and prepare prompts
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -159,7 +159,7 @@ def main():
         # print(f"Prompt IDs: {prompt_ids[0]}")
     else:
         prompt_ids = [
-            tokenizer.apply_chat_template([{"role": "user", "content": "Solve the following math problem step-by-step. " + prompt}], add_generation_prompt=True)
+            tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True)
             for prompt in prompts
         ]
 
@@ -191,7 +191,7 @@ def main():
     llm = LLM(**llm_kwargs)
     
     # Set up sampling parameters
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=128, top_p=1.0, ignore_eos=True)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=2048, top_p=1.0, ignore_eos=True)
 
 
     # Generate outputs
@@ -222,7 +222,6 @@ def main():
             print(f"Prompt length: {len(prompt_ids)}")
             print(f"Generated length: {len(generated_ids)}")
             print(f"Finish Reason: {finish_reason}")
-
 
          # Print metrics if available
         try:

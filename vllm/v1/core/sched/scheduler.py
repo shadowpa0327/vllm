@@ -337,13 +337,17 @@ class Scheduler(SchedulerInterface):
                         num_draft_tokens=num_draft_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
-                    breakpoint()
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
+                    # NOTE(brian1009): Reset self-spec related state when preempting
+                    preempted_req.self_spec_state = SelfSpecState.NORMAL
+                    preempted_req._pending_output_tokens.clear()
+                    preempted_req.spec_token_ids.clear()
+
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
