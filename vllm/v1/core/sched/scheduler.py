@@ -180,10 +180,35 @@ class Scheduler(SchedulerInterface):
         )
 
     def should_start_self_spec_verification(self, request: Request) -> bool:
-        """Check if a request should start verification based on scheduler's threshold"""
+        """Check if a request should start verification based on scheduler's threshold.
+
+        Verification is triggered when either:
+        1. We've accumulated enough tokens (>= self_spec_threshold), OR
+        2. Continuing accumulation would exceed max_model_len (safety check)
+
+        The max_model_len check prevents buffer overflow in gpu_model_runner.py:608-609
+        where token_ids_cpu buffer is sized to max_model_len.
+        """
         assert self.use_self_specs
-        return (request.self_spec_state == SelfSpecState.ACCUMULATING and 
-                len(request._pending_output_tokens) >= self.self_spec_threshold)
+        if request.self_spec_state != SelfSpecState.ACCUMULATING:
+            return False
+
+        # Normal case: reached the verification threshold
+        if len(request._pending_output_tokens) >= self.self_spec_threshold:
+            return True
+
+        # CRITICAL SAFETY CHECK: Force early verification if continuing would overflow
+        # During verification, we need space for:
+        #   num_computed_tokens + 1 (re-verify last token) + len(pending_tokens)
+        # Note: Line 249 does -1 on num_computed_tokens, and line 257 does +1 for num_new_tokens
+        # These cancel out, so effective space needed is:
+        #   num_computed_tokens + len(_pending_output_tokens)
+        # We must keep this < max_model_len to avoid buffer overflow
+        space_needed = request.num_computed_tokens + len(request._pending_output_tokens)
+        if space_needed >= self.max_model_len:
+            return True
+
+        return False
     
     # def should_start_suffix_verification(self, request: Request) -> bool:
     #     """Check if a request should start verification based on scheduler's threshold"""
@@ -246,7 +271,8 @@ class Scheduler(SchedulerInterface):
                 # considered "uncomputed" so the scheduler will schedule them for verification
                 num_scheduled_pending_output_tokens = request.num_tokens - request.num_computed_tokens
                 request.num_computed_tokens += (num_scheduled_pending_output_tokens - len(request._pending_output_tokens))
-                request.num_computed_tokens -= 1 # NOTE(brian1009) Fall back one token. 
+                # NOTE(brian1009) Fall back one token. Treat the last computed/verified token as newly generated token.
+                request.num_computed_tokens -= 1 
                 # Transition to verification state and get tokens to verify
                 tokens_to_verify = request.start_self_spec_verification()
                 # During the verification, we use full KV indices. Hence, we cleanup the sparse_selected_kv_indices
