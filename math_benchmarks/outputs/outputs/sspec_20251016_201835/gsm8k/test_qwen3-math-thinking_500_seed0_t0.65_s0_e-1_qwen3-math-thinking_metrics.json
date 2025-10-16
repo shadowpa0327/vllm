@@ -1,0 +1,31 @@
+{
+    "num_samples": 500,
+    "num_scores": 500,
+    "timeout_samples": 0,
+    "empty_samples": 0,
+    "acc": 96.2,
+    "time_use_in_second": 820.6493592262268,
+    "time_use_in_minutes": "13:40",
+    "engine_inference_seconds": 820.6493592262268,
+    "throughput": {
+        "input_tps": 51.578666971616464,
+        "output_tps": 1136.3099105801364,
+        "total_tps": 1187.8885775517529,
+        "input_tokens": 42328,
+        "output_tokens": 932512,
+        "elapsed_seconds": 821.8268282413483,
+        "engine_seconds": 820.6493592262268,
+        "engine": "vllm"
+    },
+    "speculative_decoding": {
+        "algorithm": "self_specs",
+        "total_draft_tokens": 1139768,
+        "total_accepted_tokens": 791095,
+        "total_rejected_tokens": 348673,
+        "acceptance_rate": 0.6940842346863573,
+        "acceptance_rate_percentage": 69.40842346863573,
+        "verification_count": 142471,
+        "avg_draft_per_verification": 8.0,
+        "avg_accepted_per_verification": 5.552673877490858
+    }
+}
