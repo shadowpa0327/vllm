@@ -1344,10 +1344,6 @@ class EngineArgs:
                     is_eagle_enabled = True
                 elif speculative_method == "self_specs":
                     is_self_specs_enabled = True
-                elif speculative_method == "suffix":
-                    is_suffix_enabled = True
-                elif speculative_method == "self_specs_suffix":
-                    is_self_specs_suffix_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")
                 if speculative_model in ("ngram", "[ngram]"):
@@ -1358,8 +1354,6 @@ class EngineArgs:
                 or is_eagle_enabled
                 or is_medusa_enabled
                 or is_self_specs_enabled
-                or is_suffix_enabled
-                or is_self_specs_suffix_enabled
             )
             if not supported_methods_enabled:
                 # Other speculative decoding methods are not supported yet.

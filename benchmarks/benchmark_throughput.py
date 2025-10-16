@@ -72,25 +72,13 @@ def print_metrics(metrics):
                 print(f"  Position {i}: {rate:.3f} ({acceptance_counts[i]}/{num_drafts})")
 
 
-def get_speculative_config(suffix, tokens):
-    """Get self-speculative decoding configuration based on arguments."""
-    
-    if suffix:
-        cfg = {
-            "method": "suffix",
-            "model": None,
-            "num_speculative_tokens": tokens,
-            "suffix_cache_max_depth": 6,
-            "disable_by_batch_size": 1024,
-        }
-    else:
-        cfg = {
-            "method": "self_specs",
-            "model": None,
-            "num_speculative_tokens": tokens,
-        }
-        
-    return cfg
+def get_speculative_config(tokens):
+    """Get self-speculative decoding configuration."""
+    return {
+        "method": "self_specs",
+        "model": None,
+        "num_speculative_tokens": tokens,
+    }
 
     
 
@@ -101,7 +89,6 @@ def run_vllm(
     disable_detokenize: bool = False,
     use_self_spec: bool = True,
     spec_tokens: int = 4,
-    use_suffix: bool = False,
 ) -> tuple[float, Optional[list[RequestOutput]]]:
     from vllm import LLM, SamplingParams
     
@@ -115,12 +102,12 @@ def run_vllm(
     if use_self_spec:
         engine_args.block_size = 1
         engine_args.enable_prefix_caching = False
-        speculative_config = get_speculative_config(use_suffix, spec_tokens)
+        speculative_config = get_speculative_config(spec_tokens)
 
     
         if speculative_config is not None:
             engine_args.speculative_config = speculative_config
-            print(f"Using self-speculative decoding with {speculative_config['num_speculative_tokens']} tokens. Suffix {use_suffix}")
+            print(f"Using self-speculative decoding with {speculative_config['num_speculative_tokens']} tokens")
         else:
             print("Self-speculative decoding disabled")
 
@@ -512,7 +499,6 @@ def main(args: argparse.Namespace, use_self_spec, spec_tokens):
                 args.disable_detokenize,
                 use_self_spec,
                 spec_tokens,
-                args.suffix,
             )
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -823,7 +809,6 @@ if __name__ == "__main__":
     parser.add_argument("--enable-speculative", action="store_true", help="Enable self-speculative decoding")
     
     parser.add_argument("--num-speculative-tokens", type=int, default=8, help="Number of speculative tokens for self-spec")
-    parser.add_argument("--suffix", action="store_true", help="Enable suffix cache")
     #parser.add_argument("--sink-size", type=int, default=8, help="Number of speculative tokens for self-spec")
     #parser.add_argument("--recent-size", type=int, default=128, help="Number of speculative tokens for self-spec")
 

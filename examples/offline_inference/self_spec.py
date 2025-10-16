@@ -90,8 +90,6 @@ def parse_args():
     parser.add_argument("--max_num_batched_tokens", type=int, default=8192, help="Maximum batched tokens")
     parser.add_argument("--temp", type=float, default=0, help="Sampling temperature")
     parser.add_argument("--enable_sspec", action="store_true", help="Enable self-speculative decoding")
-    parser.add_argument("--enable_suffix", action="store_true", help="Enable suffix decoding")
-    parser.add_argument("--enable_sspec_suffix", action='store_true', help="Enable suffix + self-spec hybrid spec decoding")
     parser.add_argument("--num_speculative_tokens", type=int, default=16, help="Number of speculative tokens for self-spec")
     parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
@@ -107,30 +105,12 @@ def parse_args():
 
 def get_speculative_config(args):
     """Get self-speculative decoding configuration based on arguments."""
-    if args.enable_sspec and args.enable_suffix:
-        raise ValueError("Cannot enable both self-speculative and suffix decoding")
-    elif args.enable_sspec:
+    if args.enable_sspec:
         return {
-        "method": "self_specs",
-        "model": None,
-        "num_speculative_tokens": args.num_speculative_tokens,
+            "method": "self_specs",
+            "model": None,
+            "num_speculative_tokens": args.num_speculative_tokens,
         }
-    elif args.enable_suffix:
-        return {
-        "method": "suffix",
-        "model": None,
-        "num_speculative_tokens": 8,
-        "suffix_cache_max_depth": 8,
-        "disable_by_batch_size": 1024,
-        }
-    elif args.enable_sspec_suffix:
-        return {
-        "method": "self_specs_suffix",
-        "model": None,
-        "num_speculative_tokens": args.num_speculative_tokens,
-        "suffix_cache_max_depth": 6,
-        "disable_by_batch_size": 1024,
-    }
     return None
 
 
