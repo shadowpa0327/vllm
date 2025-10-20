@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from vllm._bc_linter import bc_linter_include
+from vllm.v1.request import SelfSpecState
 
 if TYPE_CHECKING:
     import numpy as np
@@ -102,6 +103,22 @@ class CachedRequestData:
     new_block_ids: list[Optional[tuple[list[int], ...]]]
     num_computed_tokens: list[int]
 
+    # ===== SELF-SPEC FIELDS =====
+    self_spec_state: list[SelfSpecState]
+    """Current self-spec state for each request"""
+
+    pending_output_tokens: list[list[int]]
+    """Tokens in pending buffer (not yet verified) for each request"""
+
+    # Streaming cache parameters (for selective KV during ACCUMULATING phase)
+    sink_sizes: list[int]
+    """Number of sink blocks per request (for streaming cache)"""
+    recent_sizes: list[int]
+    """Number of recent blocks per request (for streaming cache)"""
+    full_kv_start_block_offsets: list[int]
+    """Block index where full KV starts per request (for streaming cache)"""
+    # ===== END SELF-SPEC FIELDS =====
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_ids)
@@ -114,6 +131,11 @@ class CachedRequestData:
             new_token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
+            self_spec_state=[],
+            pending_output_tokens=[],
+            sink_sizes=[],
+            recent_sizes=[],
+            full_kv_start_block_offsets=[],
         )
 
 
@@ -140,6 +162,7 @@ class SchedulerOutput:
     # If a request does not have any spec decode tokens, it will not be
     # included in the dictionary.
     scheduled_spec_decode_tokens: dict[str, list[int]]
+
     # req_id -> encoder input indices that need processing.
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
@@ -164,3 +187,11 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    # ===== SELF-SPEC SPARSE ATTENTION FIELDS =====
+    sparse_selected_kv_indices_of_scheduled_reqs: dict[str, list[int]] = field(default_factory=dict)
+    """Maps request_id -> list of selected KV indices (sink + recent tokens)"""
+
+    full_kv_start_offset: dict[str, int] = field(default_factory=dict)
+    """Maps request_id -> offset where full KV starts (for transition from sparse to full)"""
+    # ===== END SELF-SPEC FIELDS =====
