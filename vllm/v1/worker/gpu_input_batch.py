@@ -254,6 +254,14 @@ class InputBatch:
             pin_memory=pin_memory
         )
 
+        # Block offset where full KV computation starts
+        self.full_kv_start_block_offset_cpu_tensor = torch.zeros(
+            max_num_reqs,
+            dtype=torch.int32,
+            device='cpu',
+            pin_memory=pin_memory
+        )
+
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
@@ -623,6 +631,9 @@ class InputBatch:
         self.recent_sizes_cpu_tensor[i1], self.recent_sizes_cpu_tensor[i2] = \
             self.recent_sizes_cpu_tensor[i2], self.recent_sizes_cpu_tensor[i1]
 
+        self.full_kv_start_block_offset_cpu_tensor[i1], self.full_kv_start_block_offset_cpu_tensor[i2] = \
+            self.full_kv_start_block_offset_cpu_tensor[i2], self.full_kv_start_block_offset_cpu_tensor[i1]
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -734,6 +745,8 @@ class InputBatch:
                 self.sink_sizes_cpu_tensor[last_req_index]
             self.recent_sizes_cpu_tensor[empty_index] = \
                 self.recent_sizes_cpu_tensor[last_req_index]
+            self.full_kv_start_block_offset_cpu_tensor[empty_index] = \
+                self.full_kv_start_block_offset_cpu_tensor[last_req_index]
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1

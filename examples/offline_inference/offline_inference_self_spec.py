@@ -28,8 +28,8 @@ def load_prompts(args, tokenizer):
 
     if dataset_name == "debug":
         prompts = [
-            #"The future of AI is", 
-            #"The future of technology is",
+            "The future of AI is", 
+            "The future of technology is",
             "The mission of a PhD student is",
             #"9 out of 10 cheerleaders are 64 tall.  The 10th cheerleader is 60 tall.  If they build a human pyramid, where 4 girls are on the bottom,  3 stand on top of the 4, 2 stand on top of the 3 and the shortest girl is at the top, how tall is the human pyramid in feet?"
         ]
@@ -143,7 +143,7 @@ def main():
     llm = LLM(**llm_kwargs)
 
     # Set up sampling parameters
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=64, top_p=1.0, ignore_eos=False)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=1024, top_p=1.0, ignore_eos=True)
 
 
     # Generate outputs

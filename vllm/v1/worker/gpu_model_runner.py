@@ -821,8 +821,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if req_index is not None:
                     self.input_batch.sink_sizes_cpu_tensor[req_index] = req_data.sink_sizes[i]
                     self.input_batch.recent_sizes_cpu_tensor[req_index] = req_data.recent_sizes[i]
+                    self.input_batch.full_kv_start_block_offset_cpu_tensor[req_index] = req_data.full_kv_start_block_offsets[i]
 
-                # Sync full_kv_start_block_offset from scheduler to request state
+                # Sync full_kv_start_block_offset from scheduler to request state NOTE(brian1009): maybe remove
                 if req_id in self.requests:
                     self.requests[req_id].full_kv_start_block_offset = req_data.full_kv_start_block_offsets[i]
 
@@ -1360,17 +1361,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.recent_sizes.cpu[:num_reqs].copy_(
                     self.input_batch.recent_sizes_cpu_tensor[:num_reqs])
 
-                # Extract full_kv_start_block_offset from requests into CPU buffer
-                for req_idx in range(num_reqs):
-                    req_id = self.input_batch.req_ids[req_idx]
-                    if req_id in self.requests:
-                        request = self.requests[req_id]
-                        if hasattr(request, 'full_kv_start_block_offset'):
-                            self.full_kv_start_offset.cpu[req_idx] = request.full_kv_start_block_offset
-                        else:
-                            self.full_kv_start_offset.cpu[req_idx] = 0
-                    else:
-                        self.full_kv_start_offset.cpu[req_idx] = 0
+                self.full_kv_start_offset.cpu[:num_reqs].copy_(
+                    self.input_batch.full_kv_start_block_offset_cpu_tensor[:num_reqs])
 
                 # Copy all streaming cache buffers to GPU
                 self.sink_sizes.copy_to_gpu(num_reqs)
