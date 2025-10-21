@@ -23,6 +23,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.v1.request import SelfSpecState
 
 
 @dataclass
@@ -44,6 +45,14 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
     prompt_embeds: Optional[torch.Tensor] = None
+
+    # ===== SELF-SPEC ADDITIONS =====
+    pending_output_tokens: list[int] = None
+    self_spec_state: SelfSpecState = SelfSpecState.NORMAL
+    selective_kv_indices: Optional[list[int]] = None
+    num_selective_kv_indices: int = 0
+    full_kv_start_offset: int = 0
+    # ===== END SELF-SPEC ADDITIONS =====
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -227,6 +236,32 @@ class InputBatch:
         self.num_accepted_tokens_cpu = \
             self.num_accepted_tokens_cpu_tensor.numpy()
 
+        # ===== STREAMING CACHE BUFFERS =====
+        # Streaming cache parameters (for build_with_streaming)
+        # Number of sink blocks per request
+        self.sink_sizes_cpu_tensor = torch.zeros(
+            max_num_reqs,
+            dtype=torch.int32,
+            device='cpu',
+            pin_memory=pin_memory
+        )
+
+        # Number of recent blocks per request
+        self.recent_sizes_cpu_tensor = torch.zeros(
+            max_num_reqs,
+            dtype=torch.int32,
+            device='cpu',
+            pin_memory=pin_memory
+        )
+
+        # Block offset where full KV computation starts
+        self.full_kv_start_block_offset_cpu_tensor = torch.zeros(
+            max_num_reqs,
+            dtype=torch.int32,
+            device='cpu',
+            pin_memory=pin_memory
+        )
+
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
@@ -340,6 +375,18 @@ class InputBatch:
         self.token_ids_cpu[req_index,
                            start_idx:end_idx] = request.output_token_ids
         self.is_token_ids[req_index, start_idx:end_idx] = True
+
+        # SELF-SPEC: Also copy pending_output_tokens to token_ids_cpu
+        # The model needs to see ALL tokens (verified + pending) for the forward pass.
+        # However, only verified tokens are in output_token_ids for sampling penalties.
+        if hasattr(request, 'pending_output_tokens') and request.pending_output_tokens:
+            pending_start_idx = end_idx
+            pending_end_idx = pending_start_idx + len(request.pending_output_tokens)
+            self.token_ids_cpu[req_index,
+                               pending_start_idx:pending_end_idx] = request.pending_output_tokens
+            self.is_token_ids[req_index, pending_start_idx:pending_end_idx] = True
+            # Update end_idx to include pending tokens
+            end_idx = pending_end_idx
         # Number of token ids in prompt (token_ids_cpu or prompt_embeds).
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
@@ -443,6 +490,15 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
+        # Initialize streaming cache buffers to 0 for new/resumed requests
+        # This prevents stale data from previous requests causing wrong attention ranges
+        self.sink_sizes_cpu_tensor[req_index] = 0
+        self.recent_sizes_cpu_tensor[req_index] = 0
+        self.full_kv_start_block_offset_cpu_tensor[req_index] = 0
+
+        # Debug: Log when requests are added
+        # print(f"[ADD_REQUEST] req_id={request.req_id}, idx={req_index}, state={getattr(request, 'self_spec_state', 'N/A')}, full_kv_offset={getattr(request, 'full_kv_start_block_offset', -1)}")
+
         return req_index
 
     def remove_request(self, req_id: str) -> Optional[int]:
@@ -462,6 +518,15 @@ class InputBatch:
         self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
+
+        # Debug: Log when requests are removed
+        # old_offset = self.full_kv_start_block_offset_cpu_tensor[req_index].item()
+        # print(f"[REMOVE_REQUEST] req_id={req_id}, idx={req_index}, buffer_offset={old_offset}")
+
+        # Clear streaming cache buffers to prevent stale data from being copied during condense
+        self.sink_sizes_cpu_tensor[req_index] = 0
+        self.recent_sizes_cpu_tensor[req_index] = 0
+        self.full_kv_start_block_offset_cpu_tensor[req_index] = 0
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -577,6 +642,16 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i2], \
                     self.allowed_token_ids_mask_cpu_tensor[i1]
 
+        # Swap streaming cache buffers
+        self.sink_sizes_cpu_tensor[i1], self.sink_sizes_cpu_tensor[i2] = \
+            self.sink_sizes_cpu_tensor[i2], self.sink_sizes_cpu_tensor[i1]
+
+        self.recent_sizes_cpu_tensor[i1], self.recent_sizes_cpu_tensor[i2] = \
+            self.recent_sizes_cpu_tensor[i2], self.recent_sizes_cpu_tensor[i1]
+
+        self.full_kv_start_block_offset_cpu_tensor[i1], self.full_kv_start_block_offset_cpu_tensor[i2] = \
+            self.full_kv_start_block_offset_cpu_tensor[i2], self.full_kv_start_block_offset_cpu_tensor[i1]
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -682,6 +757,14 @@ class InputBatch:
                 last_req_index, None)
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
+
+            # Copy streaming cache buffers
+            self.sink_sizes_cpu_tensor[empty_index] = \
+                self.sink_sizes_cpu_tensor[last_req_index]
+            self.recent_sizes_cpu_tensor[empty_index] = \
+                self.recent_sizes_cpu_tensor[last_req_index]
+            self.full_kv_start_block_offset_cpu_tensor[empty_index] = \
+                self.full_kv_start_block_offset_cpu_tensor[last_req_index]
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
