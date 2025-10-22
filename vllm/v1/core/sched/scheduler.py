@@ -1496,7 +1496,7 @@ class Scheduler(SchedulerInterface):
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
-            print("self.num_spec_tokens", self.num_spec_tokens, "num_draft_tokens", num_draft_tokens, "num_accepted_tokens", num_accepted_tokens)
+            logger.debug("self.num_spec_tokens", self.num_spec_tokens, "num_draft_tokens", num_draft_tokens, "num_accepted_tokens", num_accepted_tokens)
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens,
