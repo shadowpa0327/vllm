@@ -173,10 +173,10 @@ class NgramProposer:
         )
 
         # Debug: Log the draft token counts with k value
-        draft_counts = [len(d) for d in draft_token_ids]
-        if any(draft_counts):
-            logger.debug(f"[NGRAM] propose() | k={self.k} | requests={len(draft_token_ids)} | "
-                        f"draft_counts={draft_counts} | total={sum(draft_counts)}")
+        # draft_counts = [len(d) for d in draft_token_ids]
+        # if any(draft_counts):
+        #     logger.debug(f"[NGRAM] propose() | k={self.k} | requests={len(draft_token_ids)} | "
+        #                 f"draft_counts={draft_counts} | total={sum(draft_counts)}")
 
         return draft_token_ids
 
