@@ -10,7 +10,7 @@ from vllm.inputs import TokensPrompt
 
 #from benchmark_dataset import AIMODataset
 # Set environment variables
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
 os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
@@ -27,13 +27,17 @@ def load_prompts(args, tokenizer):
     dataset_name = args.dataset_name
 
     if dataset_name == "debug":
-        prompts = [
-            #"The future of AI is", 
+        base_prompts = [
+            #"The future of AI is",
             #"The future of technology is",
             "The mission of a PhD student is",
             "Can you please repeat the following sentence: 'The future of AI is' for 8 times' ?",
             #"9 out of 10 cheerleaders are 64 tall.  The 10th cheerleader is 60 tall.  If they build a human pyramid, where 4 girls are on the bottom,  3 stand on top of the 4, 2 stand on top of the 3 and the shortest girl is at the top, how tall is the human pyramid in feet?"
         ]
+        # Repeat prompts to fill up to num_prompts
+        prompts = []
+        while len(prompts) < args.num_prompts:
+            prompts.extend(base_prompts)
         return prompts[:args.num_prompts]
 
 
@@ -50,7 +54,7 @@ def parse_args():
         choices=["debug", "aimo", "cropped_aimo"],
         help="Name of the dataset to use.",
     )
-    parser.add_argument("--max_num_seqs", type=int, default=64, help="Maximum number of sequences")
+    parser.add_argument("--max_num_seqs", type=int, default=16, help="Maximum number of sequences")
     parser.add_argument("--num_prompts", type=int, default=64, help="Number of prompts to process")
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--enforce_eager", action="store_true", help="Enforce eager execution")
@@ -183,19 +187,19 @@ def main():
     llm = LLM(**llm_kwargs)
 
     # Set up sampling parameters
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=128, top_p=1.0, ignore_eos=False)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=4096, top_p=1.0, ignore_eos=True)
 
 
     # Generate outputs
     print("Starting generation...")
     import time
     start_time = time.time()
-    #llm.start_profile()
+    llm.start_profile()
     outputs = llm.generate(
         [TokensPrompt(prompt_token_ids=x) for x in prompt_ids], 
         sampling_params=sampling_params
     )
-    #llm.stop_profile()
+    llm.stop_profile()
     end_time = time.time()
     print(f"Generation time: {end_time - start_time} seconds")
 
