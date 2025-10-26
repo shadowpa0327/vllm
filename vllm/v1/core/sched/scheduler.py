@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import time
+from array import array
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
@@ -833,7 +834,7 @@ class Scheduler(SchedulerInterface):
         new_block_ids: list[Optional[tuple[list[int], ...]]] = []
         num_computed_tokens: list[int] = []
         self_spec_states: list[SelfSpecState] = []
-        pending_output_tokens_list: list[list[int]] = []
+        pending_output_tokens_list: list[array] = []  # list of array('i')
         # Streaming cache parameters
         sink_sizes_list: list[int] = []
         recent_sizes_list: list[int] = []

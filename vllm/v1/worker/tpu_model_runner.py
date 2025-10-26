@@ -3,6 +3,7 @@
 import bisect
 import gc
 import time
+from array import array
 from typing import TYPE_CHECKING, Any, Optional, cast
 from unittest.mock import patch
 
@@ -386,17 +387,31 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
 
+            # Convert prompt_token_ids to array if it's a list
+            prompt_token_ids_array = None
+            if new_req_data.prompt_token_ids is not None:
+                if isinstance(new_req_data.prompt_token_ids, list):
+                    prompt_token_ids_array = array('i', new_req_data.prompt_token_ids)
+                else:
+                    prompt_token_ids_array = new_req_data.prompt_token_ids
+            
+            # Convert block_ids tuple of lists to tuple of arrays
+            block_ids_arrays = tuple(
+                array('i', block_list) if isinstance(block_list, list) else block_list
+                for block_list in new_req_data.block_ids
+            )
+            
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt_token_ids=prompt_token_ids_array,
                 prompt_embeds=new_req_data.prompt_embeds,
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=None,
                 generator=None,
-                block_ids=new_req_data.block_ids,
+                block_ids=block_ids_arrays,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
+                output_token_ids=array('i'),
                 lora_request=new_req_data.lora_request,
             )
 
@@ -415,14 +430,24 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not resumed_from_preemption:
                 if new_block_ids is not None:
                     # Append the new blocks to the existing block IDs.
-                    for block_ids, new_ids in zip(req_state.block_ids,
-                                                  new_block_ids):
-                        block_ids.extend(new_ids)
+                    # array doesn't have extend, so we need to create new arrays
+                    updated_block_ids = []
+                    for block_ids, new_ids in zip(req_state.block_ids, new_block_ids):
+                        # Create a new array with combined data
+                        combined = array('i', block_ids)
+                        for nid in new_ids:
+                            combined.append(nid)
+                        updated_block_ids.append(combined)
+                    req_state.block_ids = tuple(updated_block_ids)
             else:
                 assert new_block_ids is not None
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
-                req_state.block_ids = new_block_ids
+                # Convert to tuple of arrays if needed
+                req_state.block_ids = tuple(
+                    array('i', block_list) if isinstance(block_list, list) else block_list
+                    for block_list in new_block_ids
+                )
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
@@ -1104,7 +1129,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
                 self.input_batch.token_ids_cpu[
                     i, target_slice] = valid_sampled_token_ids[i]
-                req_state.output_token_ids.extend(valid_sampled_token_ids[i])
+                # array doesn't have extend, append elements one by one
+                for token_id in valid_sampled_token_ids[i]:
+                    req_state.output_token_ids.append(token_id)
 
         kv_connector_output = None if (
             finished_sending is None

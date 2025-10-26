@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining a GPU input batch
 
+from array import array
 from dataclasses import dataclass
 from typing import Optional, cast
 
@@ -30,15 +31,15 @@ from vllm.v1.request import SelfSpecState
 class CachedRequestState:
 
     req_id: str
-    prompt_token_ids: Optional[list[int]]
+    prompt_token_ids: Optional[array]  # array('i')
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
 
-    block_ids: tuple[list[int], ...]
+    block_ids: tuple[array, ...]  # tuple of array('i')
     num_computed_tokens: int
-    output_token_ids: list[int]
+    output_token_ids: array  # array('i')
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
@@ -47,9 +48,9 @@ class CachedRequestState:
     prompt_embeds: Optional[torch.Tensor] = None
 
     # ===== SELF-SPEC ADDITIONS =====
-    pending_output_tokens: list[int] = None
+    pending_output_tokens: array = None  # array('i')
     self_spec_state: SelfSpecState = SelfSpecState.NORMAL
-    selective_kv_indices: Optional[list[int]] = None
+    selective_kv_indices: Optional[array] = None  # array('i')
     num_selective_kv_indices: int = 0
     full_kv_start_offset: int = 0
     # ===== END SELF-SPEC ADDITIONS =====
@@ -293,13 +294,13 @@ class InputBatch:
         self.allowed_token_ids_mask: Optional[torch.Tensor] = None
         self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
 
-        # req_index -> bad_words_token_ids
-        self.bad_words_token_ids: dict[int, list[list[int]]] = {}
+        # req_index -> bad_words_token_ids (tuple of array('i') instead of list of lists)
+        self.bad_words_token_ids: dict[int, tuple[array, ...]] = {}
 
         self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
                                                           dtype=bool)
 
-        self.req_output_token_ids: list[Optional[list[int]]] = []
+        self.req_output_token_ids: list[Optional[array]] = []  # list of array('i')
 
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
@@ -465,8 +466,11 @@ class InputBatch:
                     sampling_params.allowed_token_ids] = False
 
             if sampling_params.bad_words_token_ids:
-                self.bad_words_token_ids[
-                    req_index] = sampling_params.bad_words_token_ids
+                # Convert list of lists to tuple of arrays
+                self.bad_words_token_ids[req_index] = tuple(
+                    array('i', token_ids) if isinstance(token_ids, list) else token_ids
+                    for token_ids in sampling_params.bad_words_token_ids
+                )
         elif pooling_params := request.pooling_params:
             self.pooling_params[req_id] = pooling_params
             self.logits_processing_needs_token_ids[req_index] = (
@@ -845,7 +849,7 @@ class InputBatch:
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
-            output_token_ids=cast(list[list[int]], self.req_output_token_ids),
+            output_token_ids=cast(list[array], self.req_output_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
