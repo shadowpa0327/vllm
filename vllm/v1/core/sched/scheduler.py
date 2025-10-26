@@ -413,8 +413,9 @@ class Scheduler(SchedulerInterface):
                     # SELF-SPEC: Reset self-spec state when preempting
                     if self.use_self_specs:
                         preempted_req.self_spec_state = SelfSpecState.NORMAL
-                        preempted_req._pending_output_tokens.clear()
-                        preempted_req.spec_token_ids.clear()
+                        # array.array doesn't have clear(), create new empty arrays
+                        preempted_req._pending_output_tokens = array('i')
+                        preempted_req.spec_token_ids = array('i')
                         # Clean up sparse KV tracking
                         self.req_to_sparse_selected_kv_indices.pop(preempted_req.request_id, None)
                         self.req_to_full_kv_start_offset.pop(preempted_req.request_id, None)
@@ -1364,7 +1365,8 @@ class Scheduler(SchedulerInterface):
             # Add newly generated spec token ids to the request.
             if not spec_token_ids:
                 # NOTE(woosuk): request.spec_token_ids should be updated.
-                request.spec_token_ids.clear()
+                # array.array doesn't have clear(), create new empty array
+                request.spec_token_ids = array('i')
             elif self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
