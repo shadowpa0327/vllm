@@ -655,9 +655,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
-
+            full_kv_start_offset = req_data.full_kv_start_block_offsets[i]
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
+
+            # NOTE(brian1009): Sync full-kv-offset
+            req_state.full_kv_start_block_offset = full_kv_start_offset
 
             # SELF-SPEC: Sync state from scheduler to worker
             # This ensures the worker's view of self-spec state matches the scheduler's
@@ -674,34 +677,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         new_pending_tokens = array('i', pending_tokens_data)
                 else:
                     new_pending_tokens = array('i')
-                
-                old_pending_tokens = req_state.pending_output_tokens if hasattr(req_state, 'pending_output_tokens') else array('i')
 
                 req_state.pending_output_tokens = new_pending_tokens
-
-                # Update token_ids_cpu to reflect the new pending tokens
-                # CRITICAL: When tokens are rejected, pending_tokens shrinks, so we need to:
-                # 1. Clear the old pending region in token_ids_cpu
-                # 2. Write the new (possibly shorter) pending tokens
-                req_index = self.input_batch.req_id_to_index.get(req_id)
-                if req_index is not None:
-                    # Position where pending tokens start (after prompt + verified output)
-                    num_prompt_tokens = self.input_batch.num_prompt_tokens[req_index]
-                    num_output_tokens = len(req_state.output_token_ids)
-                    pending_start_idx = num_prompt_tokens + num_output_tokens
-
-                    # Clear old pending region (in case tokens were rejected)
-                    # if old_pending_tokens:
-                    #     old_pending_end_idx = pending_start_idx + len(old_pending_tokens)
-                    #     self.input_batch.token_ids_cpu[req_index, pending_start_idx:old_pending_end_idx] = 0
-                    #     self.input_batch.is_token_ids[req_index, pending_start_idx:old_pending_end_idx] = False
-
-                    # Write new pending tokens
-                    if new_pending_tokens:
-                        new_pending_end_idx = pending_start_idx + len(new_pending_tokens)
-                        self.input_batch.token_ids_cpu[req_index, pending_start_idx:new_pending_end_idx] = new_pending_tokens
-                        #self.input_batch.is_token_ids[req_index, pending_start_idx:new_pending_end_idx] = True
-
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -758,12 +735,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # scheduled in the previous step and needs to be added again.
                 reqs_to_add.append(req_state)
                 continue
-
+            
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            # # debug
-            # print(f"[update_states] num_computed_tokens_cpu[{req_index}]={num_computed_tokens}")
+
+            # NOTE(brian1009): Store full-kv-offset
+            self.input_batch.full_kv_start_block_offset_cpu_tensor[req_index] = (
+                full_kv_start_offset
+            )
+
             if new_block_ids is not None:
                 self.input_batch.block_table.append_row(
                     new_block_ids, req_index)
@@ -807,9 +788,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # in num_tokens_no_spec. We need to correct this.
                     # num_tokens_no_spec should be: num_computed_tokens (from scheduler)
                     # which excludes the pending/spec tokens
-                    old_num_tokens_no_spec = self.input_batch.num_tokens_no_spec[req_index]
                     self.input_batch.num_tokens_no_spec[req_index] = num_computed_tokens
-                    #print(f"  VERIFYING: Corrected num_tokens_no_spec from {old_num_tokens_no_spec} to {num_computed_tokens}")
                 else:
                     # Normal spec decode: write after verified tokens
                     start_index = self.input_batch.num_tokens_no_spec[req_index]
@@ -829,7 +808,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # print(f"  After writing: num_tokens[{req_index}]={self.input_batch.num_tokens[req_index]}, num_tokens_no_spec={self.input_batch.num_tokens_no_spec[req_index]}")
             else:
                 pass
-                # print(f"  No spec tokens to write (or skipped because is_last_rank={is_last_rank})")
 
         # Add the new or resumed requests to the persistent batch FIRST.
         # This ensures they have indices before we update streaming cache buffers.
@@ -844,24 +822,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # This MUST happen before updating buffers to ensure buffers are updated at final indices
         self._may_reorder_batch(scheduler_output)
 
-        # ===== STREAMING CACHE: Extract and populate metadata =====
-        # Populate InputBatch CPU tensors from CachedRequestData
-        # Also sync full_kv_start_block_offset back to request states
-        # NOTE: This happens AFTER all batch reorganization (add_request, condense, reorder)
-        # to ensure buffers are updated at the FINAL indices that attention will read from
-        if hasattr(req_data, 'sink_sizes') and hasattr(req_data, 'recent_sizes') and hasattr(req_data, 'full_kv_start_block_offsets'):
-            for i, req_id in enumerate(req_data.req_ids):
-                req_index = self.input_batch.req_id_to_index.get(req_id)
-                if req_index is not None:
-                    new_offset = req_data.full_kv_start_block_offsets[i]
-
-                    self.input_batch.sink_sizes_cpu_tensor[req_index] = req_data.sink_sizes[i]
-                    self.input_batch.recent_sizes_cpu_tensor[req_index] = req_data.recent_sizes[i]
-                    self.input_batch.full_kv_start_block_offset_cpu_tensor[req_index] = new_offset
-
-                # Sync full_kv_start_block_offset from scheduler to request state NOTE(brian1009): maybe remove
-                if req_id in self.requests:
-                    self.requests[req_id].full_kv_start_block_offset = req_data.full_kv_start_block_offsets[i]
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
@@ -1361,17 +1321,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
 
-            # ===== SELF-SPEC: Detect if any request is in ACCUMULATING state =====
-            # use_selective_kv = False
-            # for req_idx in range(num_reqs):
-            #     req_id = self.input_batch.req_ids[req_idx]
-            #     if req_id in self.requests:
-            #         request = self.requests[req_id]
-            #         if (hasattr(request, 'self_spec_state') and
-            #                 request.self_spec_state == SelfSpecState.ACCUMULATING):
-            #             use_selective_kv = True
-            #             break
-
             use_selective_kv = self.vllm_config.speculative_config.use_self_specs()
 
             # ===== STREAMING CACHE: Build tensors for CommonAttentionMetadata =====
@@ -1380,28 +1329,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             full_kv_start_offset_gpu = None
 
             if use_selective_kv:
-                # Copy from InputBatch CPU tensors to staging buffers
-                self.sink_sizes.cpu[:num_reqs].copy_(
-                    self.input_batch.sink_sizes_cpu_tensor[:num_reqs])
-                self.recent_sizes.cpu[:num_reqs].copy_(
-                    self.input_batch.recent_sizes_cpu_tensor[:num_reqs])
-
                 self.full_kv_start_offset.cpu[:num_reqs].copy_(
                     self.input_batch.full_kv_start_block_offset_cpu_tensor[:num_reqs])
 
-                # Debug: Check for non-zero offsets in VERIFYING state
-                # for req_idx in range(num_reqs):
-                #     req_id = self.input_batch.req_ids[req_idx]
-                #     offset = self.full_kv_start_offset.cpu[req_idx].item()
-                #     if offset > 0 and req_id in self.requests:
-                #         req = self.requests[req_id]
-                #         if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
-                #             print(f"[ATTENTION READ ERROR] req_id={req_id}, idx={req_idx}, offset={offset}, state=VERIFYING (SHOULD BE 0!)")
-
-                # Copy all streaming cache buffers to GPU
-                self.sink_sizes.copy_to_gpu(num_reqs)
-                self.recent_sizes.copy_to_gpu(num_reqs)
+                # Copy full_kv_start_offset to GPU
                 self.full_kv_start_offset.copy_to_gpu(num_reqs)
+
+
+                #NOTE(brian1009, 10/28): Directyly operate on GPU 
+                # Broadcast sink_size (constant for all requests) directly on GPU
+                self.sink_sizes.gpu[:num_reqs] = self.vllm_config.scheduler_config.sink_size
+
+                # Compute recent_sizes on GPU from seq_lens to avoid CPU overhead
+                # Note: seq_lens is int32, recent_ratio is float, result needs to be int32
+                # PyTorch requires explicit .int() conversion; torch.mul with out= doesn't support dtype casting
+                self.recent_sizes.gpu[:num_reqs] = (
+                    self.seq_lens.gpu[:num_reqs].float() *
+                    self.vllm_config.scheduler_config.recent_ratio).int()
 
                 # Get GPU tensor views
                 sink_sizes_gpu = self.sink_sizes.gpu[:num_reqs]

@@ -10,7 +10,7 @@ from vllm.inputs import TokensPrompt
 
 #from benchmark_dataset import AIMODataset
 # Set environment variables
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
 os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
