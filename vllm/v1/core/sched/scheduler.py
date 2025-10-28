@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import itertools
 import time
-from array import array
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
@@ -413,9 +412,8 @@ class Scheduler(SchedulerInterface):
                     # SELF-SPEC: Reset self-spec state when preempting
                     if self.use_self_specs:
                         preempted_req.self_spec_state = SelfSpecState.NORMAL
-                        # array.array doesn't have clear(), create new empty arrays
-                        preempted_req._pending_output_tokens = array('i')
-                        preempted_req.spec_token_ids = array('i')
+                        preempted_req._pending_output_tokens = []
+                        preempted_req.spec_token_ids = []
                         # Clean up sparse KV tracking
                         self.req_to_sparse_selected_kv_indices.pop(preempted_req.request_id, None)
                         self.req_to_full_kv_start_offset.pop(preempted_req.request_id, None)
@@ -835,7 +833,7 @@ class Scheduler(SchedulerInterface):
         new_block_ids: list[Optional[tuple[list[int], ...]]] = []
         num_computed_tokens: list[int] = []
         self_spec_states: list[SelfSpecState] = []
-        pending_output_tokens_list: list[array] = []  # list of array('i')
+        pending_output_tokens_list: list[list[int]] = []
         # Streaming cache parameters
         sink_sizes_list: list[int] = []
         recent_sizes_list: list[int] = []
@@ -1364,8 +1362,7 @@ class Scheduler(SchedulerInterface):
             # Add newly generated spec token ids to the request.
             if not spec_token_ids:
                 # NOTE(woosuk): request.spec_token_ids should be updated.
-                # array.array doesn't have clear(), create new empty array
-                request.spec_token_ids = array('i')
+                request.spec_token_ids = []
             elif self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]

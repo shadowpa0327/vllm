@@ -4,7 +4,6 @@
 import gc
 import itertools
 import time
-from array import array
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -612,31 +611,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
-            # Convert prompt_token_ids to array if it's a list
-            prompt_token_ids_array = None
-            if new_req_data.prompt_token_ids is not None:
-                if isinstance(new_req_data.prompt_token_ids, list):
-                    prompt_token_ids_array = array('i', new_req_data.prompt_token_ids)
-                else:
-                    prompt_token_ids_array = new_req_data.prompt_token_ids
-            
-            # Convert block_ids tuple of lists to tuple of arrays
-            block_ids_arrays = tuple(
-                array('i', block_list) if isinstance(block_list, list) else block_list
-                for block_list in new_req_data.block_ids
-            )
-            
             req_state = CachedRequestState(
                 req_id=req_id,
-                prompt_token_ids=prompt_token_ids_array,
+                prompt_token_ids=new_req_data.prompt_token_ids,
                 prompt_embeds=new_req_data.prompt_embeds,
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
                 generator=generator,
-                block_ids=block_ids_arrays,
+                block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=array('i'),
+                output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
@@ -667,17 +652,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if hasattr(req_data, 'self_spec_state') and len(req_data.self_spec_state) > i:
                 req_state.self_spec_state = req_data.self_spec_state[i]
                 # Deep copy pending tokens to avoid reference issues
-                # Convert to array if needed
-                pending_tokens_data = req_data.pending_output_tokens[i]
-                if pending_tokens_data:
-                    if isinstance(pending_tokens_data, list):
-                        new_pending_tokens = array('i', pending_tokens_data)
-                    else:
-                        # If it's already an array, create a copy
-                        new_pending_tokens = array('i', pending_tokens_data)
-                else:
-                    new_pending_tokens = array('i')
-
+                new_pending_tokens = (
+                    req_data.pending_output_tokens[i].copy()
+                    if req_data.pending_output_tokens[i] else []
+                )
                 req_state.pending_output_tokens = new_pending_tokens
 
             if not is_last_rank:
@@ -694,39 +672,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     req_state.output_token_ids.append(new_token_ids[-1])
                     req_state._num_output_tokens += 1
                 elif num_new_tokens > 0:
-                    # array doesn't have extend, need to add elements one by one
-                    tokens_to_add = new_token_ids[-num_new_tokens:]
-                    for token_id in tokens_to_add:
-                        req_state.output_token_ids.append(token_id)
+                    req_state.output_token_ids.extend(
+                        new_token_ids[-num_new_tokens:])
                     req_state._num_output_tokens += num_new_tokens
 
             # Update the block IDs.
             if not resumed_from_preemption:
                 if new_block_ids is not None:
                     # Append the new blocks to the existing block IDs.
-                    # array doesn't have extend, so we need to create new arrays
-                    updated_block_ids = []
-                    for block_ids, new_ids in zip(req_state.block_ids, new_block_ids):
-                        # Create a new array with combined data
-                        combined = array('i', block_ids)
-                        # Convert new_ids to list if it's not already iterable properly
-                        if isinstance(new_ids, list):
-                            for nid in new_ids:
-                                combined.append(nid)
-                        else:
-                            for nid in new_ids:
-                                combined.append(nid)
-                        updated_block_ids.append(combined)
-                    req_state.block_ids = tuple(updated_block_ids)
+                    for block_ids, new_ids in zip(req_state.block_ids,
+                                                  new_block_ids):
+                        block_ids.extend(new_ids)
             else:
                 assert new_block_ids is not None
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
-                # Convert to tuple of arrays if needed
-                req_state.block_ids = tuple(
-                    array('i', block_list) if isinstance(block_list, list) else block_list
-                    for block_list in new_block_ids
-                )
+                req_state.block_ids = new_block_ids
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
@@ -2386,18 +2347,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_state.self_spec_state == SelfSpecState.ACCUMULATING):
                 # In ACCUMULATING mode: tokens go to pending buffer
                 if not hasattr(req_state, 'pending_output_tokens'):
-                    req_state.pending_output_tokens = array('i')
+                    req_state.pending_output_tokens = []
                 if req_state.pending_output_tokens is None:
-                    req_state.pending_output_tokens = array('i')
+                    req_state.pending_output_tokens = []
 
                 # Position calculation for ACCUMULATING:
                 # [prompt | verified_output | existing_pending | NEW_TOKENS_HERE]
                 num_existing_pending = len(req_state.pending_output_tokens)
                 start_idx = num_prompt_tokens + num_output_tokens + num_existing_pending
 
-                # array doesn't have extend, append elements one by one
-                for token_id in sampled_ids:
-                    req_state.pending_output_tokens.append(token_id)
+                req_state.pending_output_tokens.extend(sampled_ids)
             else:
                 # NORMAL/VERIFYING mode: tokens go to output_token_ids
                 # Position calculation for NORMAL/VERIFYING:
@@ -2405,9 +2364,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Note: During VERIFYING, no new tokens should be sampled
                 start_idx = num_prompt_tokens + num_output_tokens
 
-                # array doesn't have extend, append elements one by one
-                for token_id in sampled_ids:
-                    req_state.output_token_ids.append(token_id)
+                req_state.output_token_ids.extend(sampled_ids)
                 req_state._num_output_tokens += len(sampled_ids)
 
             end_idx = start_idx + len(sampled_ids)

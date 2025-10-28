@@ -3,7 +3,6 @@
 
 import enum
 import time
-from array import array
 from collections.abc import Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
@@ -36,7 +35,7 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: Optional[Union[list[int], array]],  # Can accept list or array
+        prompt_token_ids: Optional[list[int]],
         sampling_params: Optional[SamplingParams],
         pooling_params: Optional[PoolingParams],
         eos_token_id: Optional[int],
@@ -90,31 +89,19 @@ class Request:
             raise ValueError(
                 "sampling_params and pooling_params can't both be unset")
 
-        # Convert prompt_token_ids to array if it's a list
-        if prompt_token_ids is not None:
-            if isinstance(prompt_token_ids, list):
-                self.prompt_token_ids = array('i', prompt_token_ids)
-            else:
-                self.prompt_token_ids = prompt_token_ids
-        else:
-            self.prompt_token_ids = None
-            
+        self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds)
-        self._output_token_ids: array = array('i')
-        
-        # Create _all_token_ids as array
-        if self.prompt_token_ids is not None:
-            self._all_token_ids: array = array('i', self.prompt_token_ids)
-        else:
-            self._all_token_ids: array = array('i', [0] * self.num_prompt_tokens)
-            
+        self._output_token_ids: list[int] = []
+        self._all_token_ids: list[int] = self.prompt_token_ids.copy(
+        ) if self.prompt_token_ids is not None else [0
+                                                     ] * self.num_prompt_tokens
         self.num_output_placeholders = 0  # Used in async scheduling.
         # Self-speculative decoding state and buffers
         self.self_spec_state = SelfSpecState.NORMAL
-        self._pending_output_tokens: array = array('i')  # Tokens waiting for verification
-        self.spec_token_ids: array = array('i')
+        self._pending_output_tokens: list[int] = []  # Tokens waiting for verification
+        self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         # Streaming cache: block index where full KV computation starts
         self.full_kv_start_block_offset: int = 0
@@ -174,16 +161,14 @@ class Request:
 
     def append_output_token_ids(
         self,
-        token_ids: Union[int, list[int], array],
+        token_ids: Union[int, list[int]],
     ) -> None:
         if isinstance(token_ids, int):
             self._output_token_ids.append(token_ids)
             self._all_token_ids.append(token_ids)
         else:
-            # array doesn't have extend, append elements one by one
-            for token_id in token_ids:
-                self._output_token_ids.append(token_id)
-                self._all_token_ids.append(token_id)
+            self._output_token_ids.extend(token_ids)
+            self._all_token_ids.extend(token_ids)
 
         if self.get_hash_new_full_blocks is not None:
             self.block_hashes.extend(self.get_hash_new_full_blocks())
@@ -244,20 +229,20 @@ class Request:
             f"Can only add pending tokens in ACCUMULATING state, got {self.self_spec_state}"
         self._pending_output_tokens.append(token_id)
 
-    def start_self_spec_verification(self) -> array:
+    def start_self_spec_verification(self) -> list[int]:
         """Start verification and return tokens to verify"""
         assert self.self_spec_state == SelfSpecState.ACCUMULATING, \
             f"Can only start verification from ACCUMULATING state, got {self.self_spec_state}"
         self.self_spec_state = SelfSpecState.VERIFYING
         # Move pending tokens to spec_token_ids for verification
-        self.spec_token_ids = array('i', self._pending_output_tokens)
+        self.spec_token_ids = self._pending_output_tokens.copy()
         # Clear pending tokens
-        self._pending_output_tokens = array('i')
+        self._pending_output_tokens = []
         return self.spec_token_ids
 
-    def get_pending_tokens(self) -> array:
+    def get_pending_tokens(self) -> list[int]:
         """Get current pending tokens (for data transfer to workers)"""
-        return array('i', self._pending_output_tokens)
+        return self._pending_output_tokens.copy()
 
     @property
     def is_in_self_spec_mode(self) -> bool:
