@@ -882,20 +882,19 @@ class Scheduler(SchedulerInterface):
             if req.self_spec_state == SelfSpecState.ACCUMULATING:
                 # Use streaming cache for ACCUMULATING state
                 # Compute recent_size dynamically based on num_computed_tokens and recent_ratio
-                num_recent_blocks = int(req.num_computed_tokens * self.streaming_cache_recent_ratio / self.block_size)
-                sink_sizes_list.append(self.streaming_cache_sink_size_blocks)
-                recent_sizes_list.append(num_recent_blocks)
+                #num_recent_blocks = int(req.num_computed_tokens * self.streaming_cache_recent_ratio / self.block_size)
+                #NOTE(brian1009, 10/28): Compute in GPU Model Runner
+                #sink_sizes_list.append(self.streaming_cache_sink_size_blocks)
+                #recent_sizes_list.append(num_recent_blocks)
                 # CRITICAL: Use dictionary which is updated correctly, not request field which may be stale
                 full_kv_start_block_offsets_list.append(self.req_to_full_kv_start_offset.get(req_id, 0))
             else:
                 # NORMAL or VERIFYING: use full KV (no streaming cache)
-                sink_sizes_list.append(0)
-                recent_sizes_list.append(0)
+                #NOTE(brian1009, 10/28): Compute in GPU Model Runner
+                #sink_sizes_list.append(0)
+                #recent_sizes_list.append(0)
                 full_kv_start_block_offsets_list.append(0)
-                # Debug: Log what scheduler is sending for VERIFYING requests
-                # if self.use_self_specs and req.self_spec_state == SelfSpecState.VERIFYING:
-                #     logger.debug(f"[SELF_SPEC_NGRAM] Request {req_id}: VERIFYING in scheduler | "
-                #                  f"full_kv_offset={req.full_kv_start_block_offset}")
+
 
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
