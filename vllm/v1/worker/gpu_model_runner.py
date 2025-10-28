@@ -715,11 +715,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if num_new_tokens == 1:
                     # Avoid slicing list in most common case.
                     req_state.output_token_ids.append(new_token_ids[-1])
+                    req_state._num_output_tokens += 1
                 elif num_new_tokens > 0:
                     # array doesn't have extend, need to add elements one by one
                     tokens_to_add = new_token_ids[-num_new_tokens:]
                     for token_id in tokens_to_add:
                         req_state.output_token_ids.append(token_id)
+                    req_state._num_output_tokens += num_new_tokens
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -2462,6 +2464,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # array doesn't have extend, append elements one by one
                 for token_id in sampled_ids:
                     req_state.output_token_ids.append(token_id)
+                req_state._num_output_tokens += len(sampled_ids)
 
             end_idx = start_idx + len(sampled_ids)
             assert end_idx <= self.max_model_len, (

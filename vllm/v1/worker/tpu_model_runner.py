@@ -1115,6 +1115,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 token_id = valid_sampled_token_ids[i][0]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
+                req_state._num_output_tokens += 1
                 self.input_batch.num_tokens[i] += 1
 
         else:
@@ -1132,6 +1133,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # array doesn't have extend, append elements one by one
                 for token_id in valid_sampled_token_ids[i]:
                     req_state.output_token_ids.append(token_id)
+                req_state._num_output_tokens += len(valid_sampled_token_ids[i])
 
         kv_connector_output = None if (
             finished_sending is None

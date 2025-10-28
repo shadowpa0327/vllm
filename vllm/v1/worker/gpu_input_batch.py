@@ -58,10 +58,12 @@ class CachedRequestState:
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds)
+        # Cache the length of output_token_ids to avoid recomputing in hot paths
+        self._num_output_tokens = len(self.output_token_ids)
 
     @property
     def num_tokens(self) -> int:
-        return self.num_prompt_tokens + len(self.output_token_ids)
+        return self.num_prompt_tokens + self._num_output_tokens
 
     # Temporary back-compatibility for plugins that define model runner
     @property
