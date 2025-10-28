@@ -296,7 +296,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-    reorder_batch_threshold: int = 1
+
+    #NOTE(brian1009): set to 0 to disable reordering of batch!!
+    # Ask Yilong!!!!!!!!!!!!!!!
+    reorder_batch_threshold: int = 0
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -350,7 +353,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         supports_spec_as_decode = \
             can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode)
+        
+        #NOTE(brian1009): set to 0 to disable reordering of batch!!
+        # Ask Yilong!!!!!!!!!!!!!!!
+        self._init_reorder_batch_threshold(0, supports_spec_as_decode)
+        #self._init_reorder_batch_threshold(1, supports_spec_as_decode)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -468,6 +475,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             split_decodes_and_prefills(common_attn_metadata,
                                        decode_threshold=self.reorder_batch_threshold,
                                        require_uniform=True)
+
+        assert num_decodes == 0
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
@@ -747,6 +756,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             split_decodes_and_prefills(common_attn_metadata,
                                        decode_threshold=self.reorder_batch_threshold,
                                        require_uniform=True)
+
+        assert num_decodes == 0
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
