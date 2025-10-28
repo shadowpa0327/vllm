@@ -690,41 +690,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_output_tokens = len(req_state.output_token_ids)
                     pending_start_idx = num_prompt_tokens + num_output_tokens
 
-                    # # DEBUG: Print token_ids_cpu state BEFORE clearing
-                    # print(f"\n[update_states] BEFORE clearing - req_id={req_id} req_index={req_index}")
-                    # print(f"  self_spec_state={req_state.self_spec_state}")
-                    # print(f"  num_prompt_tokens={num_prompt_tokens}")
-                    # print(f"  num_output_tokens (len(output_token_ids))={num_output_tokens}")
-                    # print(f"  num_computed_tokens (from scheduler)={num_computed_tokens}")
-                    # print(f"  pending_start_idx={pending_start_idx}")
-                    # print(f"  old_pending_tokens={old_pending_tokens}")
-                    # print(f"  new_pending_tokens={new_pending_tokens}")
-                    # print(f"  num_tokens_no_spec[{req_index}]={self.input_batch.num_tokens_no_spec[req_index]}")
-                    # print(f"  num_tokens[{req_index}]={self.input_batch.num_tokens[req_index]}")
-
-                    # # Print relevant section of token_ids_cpu
-                    # max_idx = min(self.input_batch.num_tokens_no_spec[req_index] + 5, self.input_batch.token_ids_cpu.shape[1])
-                    # print(f"  token_ids_cpu[{req_index}, 0:{max_idx}] = {self.input_batch.token_ids_cpu[req_index, :max_idx].tolist()}")
-
                     # Clear old pending region (in case tokens were rejected)
-                    if old_pending_tokens:
-                        old_pending_end_idx = pending_start_idx + len(old_pending_tokens)
-                        self.input_batch.token_ids_cpu[req_index, pending_start_idx:old_pending_end_idx] = 0
-                        self.input_batch.is_token_ids[req_index, pending_start_idx:old_pending_end_idx] = False
+                    # if old_pending_tokens:
+                    #     old_pending_end_idx = pending_start_idx + len(old_pending_tokens)
+                    #     self.input_batch.token_ids_cpu[req_index, pending_start_idx:old_pending_end_idx] = 0
+                    #     self.input_batch.is_token_ids[req_index, pending_start_idx:old_pending_end_idx] = False
 
                     # Write new pending tokens
                     if new_pending_tokens:
                         new_pending_end_idx = pending_start_idx + len(new_pending_tokens)
                         self.input_batch.token_ids_cpu[req_index, pending_start_idx:new_pending_end_idx] = new_pending_tokens
-                        self.input_batch.is_token_ids[req_index, pending_start_idx:new_pending_end_idx] = True
+                        #self.input_batch.is_token_ids[req_index, pending_start_idx:new_pending_end_idx] = True
 
-                    # # DEBUG: Print state AFTER clearing/writing
-                    # print(f"[update_states] AFTER clearing/writing - req_id={req_id} req_index={req_index}")
-                    # print(f"  num_tokens_no_spec[{req_index}]={self.input_batch.num_tokens_no_spec[req_index]} (UNCHANGED)")
-                    # print(f"  num_tokens[{req_index}]={self.input_batch.num_tokens[req_index]} (UNCHANGED)")
-                    # max_idx_after = min(self.input_batch.num_tokens_no_spec[req_index] + 5, self.input_batch.token_ids_cpu.shape[1])
-                    # print(f"  token_ids_cpu[{req_index}, 0:{max_idx_after}] = {self.input_batch.token_ids_cpu[req_index, :max_idx_after].tolist()}")
-                    # print(f"  token_ids_cpu pending region: [{pending_start_idx}:{pending_start_idx + len(new_pending_tokens) if new_pending_tokens else pending_start_idx}]")
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -806,11 +783,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
 
-            # # DEBUG: Print spec token info (even if skipped for last_rank)
-            # logger.debug(f"[update_states] spec_token_ids for req_id={req_id}")
-            # logger.debug(f"  is_last_rank={is_last_rank}")
-            # logger.debug(f"  spec_token_ids={list(spec_token_ids) if spec_token_ids else []}")
-
             if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
 
@@ -827,7 +799,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_prompt_tokens = self.input_batch.num_prompt_tokens[req_index]
                     num_output_tokens = len(req_state.output_token_ids)
                     start_index = num_prompt_tokens + num_output_tokens
-                    # print(f"  VERIFYING: Using pending_start_idx={start_index} instead of num_tokens_no_spec={self.input_batch.num_tokens_no_spec[req_index]}")
 
                     # IMPORTANT: Also fix num_tokens_no_spec to reflect actual verified tokens
                     # During VERIFYING, pending tokens from ACCUMULATING were incorrectly counted
@@ -877,55 +848,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # NOTE: This happens AFTER all batch reorganization (add_request, condense, reorder)
         # to ensure buffers are updated at the FINAL indices that attention will read from
         if hasattr(req_data, 'sink_sizes') and hasattr(req_data, 'recent_sizes') and hasattr(req_data, 'full_kv_start_block_offsets'):
-            # Debug: Log the complete mapping of indices to request IDs after reordering
-            # verifying_reqs = []
-            # for idx in range(min(10, self.input_batch.num_reqs)):
-            #     if idx < len(self.input_batch.req_ids):
-            #         req_id = self.input_batch.req_ids[idx]
-            #         if req_id in self.requests:
-            #             req = self.requests[req_id]
-            #             if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
-            #                 verifying_reqs.append((idx, req_id))
-            # if verifying_reqs:
-            #     print(f"[INDEX MAP AT WRITE] VERIFYING requests: {verifying_reqs}")
-
             for i, req_id in enumerate(req_data.req_ids):
                 req_index = self.input_batch.req_id_to_index.get(req_id)
                 if req_index is not None:
-                    # old_offset = self.input_batch.full_kv_start_block_offset_cpu_tensor[req_index].item()  # For debug only
                     new_offset = req_data.full_kv_start_block_offsets[i]
 
                     self.input_batch.sink_sizes_cpu_tensor[req_index] = req_data.sink_sizes[i]
                     self.input_batch.recent_sizes_cpu_tensor[req_index] = req_data.recent_sizes[i]
                     self.input_batch.full_kv_start_block_offset_cpu_tensor[req_index] = new_offset
 
-                    # Debug: Log ALL buffer updates, especially for VERIFYING
-                    # if req_id in self.requests:
-                    #     req = self.requests[req_id]
-                    #     if hasattr(req, 'self_spec_state'):
-                    #         if old_offset == 0 and new_offset != 0:
-                    #             print(f"[BUFFER UPDATE RESUMED] req_id={req_id}, idx={req_index}, {old_offset}→{new_offset}, state={req.self_spec_state}")
-                    #         elif req.self_spec_state == SelfSpecState.VERIFYING:
-                    #             print(f"[BUFFER UPDATE VERIFYING] req_id={req_id}, idx={req_index}, {old_offset}→{new_offset}, state=VERIFYING")
-
                 # Sync full_kv_start_block_offset from scheduler to request state NOTE(brian1009): maybe remove
                 if req_id in self.requests:
                     self.requests[req_id].full_kv_start_block_offset = req_data.full_kv_start_block_offsets[i]
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
-
-        # Debug: Verify index mapping after refresh_metadata
-        # if hasattr(req_data, 'sink_sizes'):
-        #     verifying_reqs_after = []
-        #     for idx in range(min(10, self.input_batch.num_reqs)):
-        #         if idx < len(self.input_batch.req_ids):
-        #             req_id = self.input_batch.req_ids[idx]
-        #             if req_id in self.requests:
-        #                 req = self.requests[req_id]
-        #                 if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
-        #                     verifying_reqs_after.append((idx, req_id))
-        #     if verifying_reqs_after:
-        #         print(f"[INDEX MAP AFTER REFRESH] VERIFYING requests: {verifying_reqs_after}")
 
     def _update_states_after_model_execute(
             self, output_token_ids: torch.Tensor) -> None:
@@ -1162,19 +1098,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
-        # Debug: Check if indices have changed at start of _prepare_inputs
-        # verifying_reqs_prepare = []
-        # for idx in range(min(10, self.input_batch.num_reqs)):
-        #     if idx < len(self.input_batch.req_ids):
-        #         req_id = self.input_batch.req_ids[idx]
-        #         if req_id in self.requests:
-        #             req = self.requests[req_id]
-        #             if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
-        #                 offset_val = self.input_batch.full_kv_start_block_offset_cpu_tensor[idx].item()
-        #                 verifying_reqs_prepare.append((idx, req_id, offset_val))
-        # if verifying_reqs_prepare:
-        #     print(f"[INDEX MAP IN PREPARE] VERIFYING requests: {verifying_reqs_prepare}")
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -1437,18 +1360,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_common_prefix_blocks[kv_cache_group_id])
 
             # ===== SELF-SPEC: Detect if any request is in ACCUMULATING state =====
-            use_selective_kv = False
-            for req_idx in range(num_reqs):
-                req_id = self.input_batch.req_ids[req_idx]
-                if req_id in self.requests:
-                    request = self.requests[req_id]
-                    if (hasattr(request, 'self_spec_state') and
-                            request.self_spec_state == SelfSpecState.ACCUMULATING):
-                        use_selective_kv = True
-                        # logger.debug(
-                        #     f"Detected request {req_id} in ACCUMULATING state, "
-                        #     "using selective KV attention")
-                        break
+            # use_selective_kv = False
+            # for req_idx in range(num_reqs):
+            #     req_id = self.input_batch.req_ids[req_idx]
+            #     if req_id in self.requests:
+            #         request = self.requests[req_id]
+            #         if (hasattr(request, 'self_spec_state') and
+            #                 request.self_spec_state == SelfSpecState.ACCUMULATING):
+            #             use_selective_kv = True
+            #             break
+
+            use_selective_kv = self.vllm_config.speculative_config.use_self_specs()
 
             # ===== STREAMING CACHE: Build tensors for CommonAttentionMetadata =====
             sink_sizes_gpu = None
@@ -1466,13 +1388,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.input_batch.full_kv_start_block_offset_cpu_tensor[:num_reqs])
 
                 # Debug: Check for non-zero offsets in VERIFYING state
-                for req_idx in range(num_reqs):
-                    req_id = self.input_batch.req_ids[req_idx]
-                    offset = self.full_kv_start_offset.cpu[req_idx].item()
-                    if offset > 0 and req_id in self.requests:
-                        req = self.requests[req_id]
-                        if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
-                            print(f"[ATTENTION READ ERROR] req_id={req_id}, idx={req_idx}, offset={offset}, state=VERIFYING (SHOULD BE 0!)")
+                # for req_idx in range(num_reqs):
+                #     req_id = self.input_batch.req_ids[req_idx]
+                #     offset = self.full_kv_start_offset.cpu[req_idx].item()
+                #     if offset > 0 and req_id in self.requests:
+                #         req = self.requests[req_id]
+                #         if hasattr(req, 'self_spec_state') and req.self_spec_state == SelfSpecState.VERIFYING:
+                #             print(f"[ATTENTION READ ERROR] req_id={req_id}, idx={req_idx}, offset={offset}, state=VERIFYING (SHOULD BE 0!)")
 
                 # Copy all streaming cache buffers to GPU
                 self.sink_sizes.copy_to_gpu(num_reqs)
@@ -2556,19 +2478,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
-            # DEBUG: Print comprehensive state for manual verification
-            # self_spec_state = req_state.self_spec_state if hasattr(req_state, 'self_spec_state') else 'NONE'
-            # num_pending = len(req_state.pending_output_tokens) if (hasattr(req_state, 'pending_output_tokens') and req_state.pending_output_tokens is not None) else 0
-            # print(f"[bookkeeping_sync] req_id={req_id} req_idx={req_idx}")
-            # print(f"  self_spec_state={self_spec_state}")
-            # print(f"  sampled_ids={sampled_ids}")
-            # print(f"  num_prompt_tokens={num_prompt_tokens}")
-            # print(f"  len(output_token_ids)={num_output_tokens}")
-            # print(f"  len(pending_output_tokens)={num_pending}")
-            # print(f"  token_ids_cpu write position: [{start_idx}:{end_idx}]")
-            # print(f"  num_computed_tokens_cpu={self.input_batch.num_computed_tokens_cpu[req_idx]}")
-            # print(f"  num_tokens_no_spec={self.input_batch.num_tokens_no_spec[req_idx]}")
-            # print(f"  num_tokens={self.input_batch.num_tokens[req_idx]}")
 
         return (
             num_nans_in_logits,
