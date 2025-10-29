@@ -60,7 +60,13 @@ echo "  Block size: $SSPEC_NGRAM_BLOCK_SIZE"
 echo ""
 
 # Ensure we're in the correct directory
-cd /home/ubuntu/vllm/math_benchmarks_backup1022
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MATH_BENCH_ROOT="${MATH_BENCH_ROOT:-$(cd "$SCRIPT_DIR/../../math_benchmarks_backup1022" && pwd)}"
+if [ ! -d "$MATH_BENCH_ROOT" ]; then
+    echo "Error: math benchmarks directory not found at $MATH_BENCH_ROOT" >&2
+    exit 1
+fi
+cd "$MATH_BENCH_ROOT"
 
 # Build command with optional arguments
 CMD_ARGS=(
