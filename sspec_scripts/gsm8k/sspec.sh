@@ -11,7 +11,7 @@ echo "================================================"
 # Configuration (using same defaults as run_baseline_snapshot.sh)
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"
 PROMPT_TYPE="${PROMPT_TYPE:-qwen3-math-thinking}"
-NUM_SAMPLES="${NUM_SAMPLES:-200}"
+NUM_SAMPLES="${NUM_SAMPLES:-100}"
 OUTPUT_DIR="outputs/sspec_$(date +%Y%m%d_%H%M%S)"
 
 # Test datasets (quick ones first)

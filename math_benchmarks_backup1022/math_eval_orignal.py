@@ -175,6 +175,43 @@ def parse_args():
         help="Maximum ngram size for vLLM prompt lookup",
     )
 
+    # vLLM suffix decoding speculative decoding arguments
+    parser.add_argument(
+        "--vllm_enable_suffix",
+        action="store_true",
+        help="Enable suffix decoding speculative decoding in vLLM",
+    )
+    parser.add_argument(
+        "--vllm_suffix_num_speculative_tokens",
+        type=int,
+        default=5,
+        help="Number of speculative tokens for suffix decoding",
+    )
+    parser.add_argument(
+        "--vllm_suffix_max_tree_depth",
+        type=int,
+        default=24,
+        help="Maximum depth for suffix tree pattern matching",
+    )
+    parser.add_argument(
+        "--vllm_suffix_max_cached_requests",
+        type=int,
+        default=10000,
+        help="Maximum number of cached request responses (0 = disable global cache)",
+    )
+    parser.add_argument(
+        "--vllm_suffix_max_spec_factor",
+        type=float,
+        default=1.0,
+        help="Speculation length factor: max_spec_tokens = factor × prefix_match_length",
+    )
+    parser.add_argument(
+        "--vllm_suffix_min_token_prob",
+        type=float,
+        default=0.1,
+        help="Minimum frequency threshold for speculating a token",
+    )
+
     # vLLM EAGLE3 speculative decoding arguments
     parser.add_argument(
         "--vllm_enable_eagle3",
@@ -478,11 +515,11 @@ def setup(args):
         available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
         if args.use_vllm:
             # Check for mutually exclusive vLLM speculative decoding options
-            spec_options = sum([args.vllm_enable_ngram, args.vllm_enable_eagle3, args.vllm_enable_sspec, args.vllm_enable_sspec_ngram])
+            spec_options = sum([args.vllm_enable_ngram, args.vllm_enable_eagle3, args.vllm_enable_sspec, args.vllm_enable_sspec_ngram, args.vllm_enable_suffix])
             if spec_options > 1:
                 raise ValueError(
                     "Cannot enable multiple speculative decoding methods at the same time. "
-                    "Please choose only one: vllm_enable_ngram, vllm_enable_eagle3, vllm_enable_sspec, or vllm_enable_sspec_ngram."
+                    "Please choose only one: vllm_enable_ngram, vllm_enable_eagle3, vllm_enable_sspec, vllm_enable_sspec_ngram, or vllm_enable_suffix."
                 )
 
             # Set environment variables for self-spec methods (must be set before vLLM import)
@@ -503,8 +540,6 @@ def setup(args):
                 // args.pipeline_parallel_size,
                 "pipeline_parallel_size": args.pipeline_parallel_size,
                 "trust_remote_code": True,
-                "enable_prefix_caching": False,
-                "disable_log_stats": False,
             }
 
             # Add ngram speculative decoding config if enabled
@@ -520,6 +555,24 @@ def setup(args):
                 vllm_kwargs["disable_log_stats"] = False
                 print(
                     f"Enabled vLLM ngram speculative decoding with config: {speculative_config}"
+                )
+                print(f"Enabled vLLM stat logging for metrics collection")
+
+            # Add suffix decoding speculative decoding config if enabled
+            if args.vllm_enable_suffix:
+                speculative_config = {
+                    "method": "suffix",
+                    "num_speculative_tokens": args.vllm_suffix_num_speculative_tokens,
+                    "suffix_decoding_max_tree_depth": args.vllm_suffix_max_tree_depth,
+                    "suffix_decoding_max_cached_requests": args.vllm_suffix_max_cached_requests,
+                    "suffix_decoding_max_spec_factor": args.vllm_suffix_max_spec_factor,
+                    "suffix_decoding_min_token_prob": args.vllm_suffix_min_token_prob,
+                }
+                vllm_kwargs["speculative_config"] = speculative_config
+                # IMPORTANT: Enable stat logging to access spec decode metrics via get_metrics()
+                vllm_kwargs["disable_log_stats"] = False
+                print(
+                    f"Enabled vLLM suffix decoding with config: {speculative_config}"
                 )
                 print(f"Enabled vLLM stat logging for metrics collection")
 
@@ -1006,8 +1059,8 @@ def main(llm, tokenizer, data_name, args):
     ]
     time_use = time.time() - start_time
 
-    # Get vLLM speculation statistics after all generation is done (ngram, EAGLE3, self-spec, or self-spec-ngram)
-    if args.use_vllm and (args.vllm_enable_ngram or args.vllm_enable_eagle3 or args.vllm_enable_sspec or args.vllm_enable_sspec_ngram):
+    # Get vLLM speculation statistics after all generation is done (ngram, EAGLE3, self-spec, self-spec-ngram, or suffix)
+    if args.use_vllm and (args.vllm_enable_ngram or args.vllm_enable_eagle3 or args.vllm_enable_sspec or args.vllm_enable_sspec_ngram or args.vllm_enable_suffix):
         try:
             if args.vllm_enable_ngram:
                 spec_method = "ngram"
@@ -1015,6 +1068,8 @@ def main(llm, tokenizer, data_name, args):
                 spec_method = "EAGLE3"
             elif args.vllm_enable_sspec_ngram:
                 spec_method = "self_spec_ngram"
+            elif args.vllm_enable_suffix:
+                spec_method = "suffix"
             else:
                 spec_method = "self_specs"
 
@@ -1183,6 +1238,8 @@ def main(llm, tokenizer, data_name, args):
                 algorithm = "self_spec_ngram"
             elif args.use_vllm and args.vllm_enable_sspec:
                 algorithm = "self_specs"
+            elif args.use_vllm and args.vllm_enable_suffix:
+                algorithm = "suffix"
             else:
                 algorithm = "Unknown"
 
@@ -1236,6 +1293,10 @@ def main(llm, tokenizer, data_name, args):
                     result_json["speculative_decoding"][
                         "note"
                     ] = "self-speculative decoding with n-gram draft assistance (n-gram drafting metrics)"
+                elif args.use_vllm and args.vllm_enable_suffix:
+                    result_json["speculative_decoding"][
+                        "note"
+                    ] = "suffix decoding with frequency-based speculation"
 
                 print(f"\n[{algorithm} Spec Decode Statistics (N-gram/Draft)]")
                 print(f"  Draft tokens: {total_draft_tokens:,}")

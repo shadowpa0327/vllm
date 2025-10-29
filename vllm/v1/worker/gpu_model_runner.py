@@ -299,6 +299,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logger.info(f"[SELF_SPEC_NGRAM] Initialized NgramProposer | "
                             f"k={self.drafter.k} (num_ngram_draft_tokens) | "
                             f"min_n={self.drafter.min_n} | max_n={self.drafter.max_n}")
+            elif self.speculative_config.method == "self_spec_suffix":
+                # Self-spec with suffix decode assistance during ACCUMULATING phase
+                from vllm.v1.spec_decode.suffix_decoding import (
+                    SuffixDecodingProposer)
+                self.drafter = SuffixDecodingProposer(self.vllm_config)
+                logger.info(f"[SELF_SPEC_SUFFIX] Initialized SuffixDecodingProposer | "
+                            f"max_tree_depth={self.drafter.max_tree_depth}")
+            elif self.speculative_config.method == "suffix":
+                # Suffix decoding
+                from vllm.v1.spec_decode.suffix_decoding import (
+                    SuffixDecodingProposer)
+                self.drafter = SuffixDecodingProposer(self.vllm_config)
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
@@ -2699,8 +2711,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.spec_decode_unsupported_reqs)
             # logger.debug(f"[SELF_SPEC_NGRAM] propose_draft_token_ids | "
             #             f"num_requests={len(draft_token_ids)} | "
+            #             f"draft_counts={[len(d) for d in draft_token_ids)} | "
+            #             f"total_drafts={sum(len(d) for d in draft_token_ids)}")
+        elif self.speculative_config.method == "self_spec_suffix":
+            # Self-spec with suffix: propose drafts for all requests
+            # Scheduler will override with pending_output_tokens when transitioning to VERIFYING
+            assert isinstance(sampled_token_ids, list)
+            from vllm.v1.spec_decode.suffix_decoding import (
+                SuffixDecodingProposer)
+            assert isinstance(self.drafter, SuffixDecodingProposer)
+            draft_token_ids = self.drafter.propose(
+                input_batch=self.input_batch,
+                sampled_token_ids=sampled_token_ids)
+            # logger.debug(f"[SELF_SPEC_SUFFIX] propose_draft_token_ids | "
+            #             f"num_requests={len(draft_token_ids)} | "
             #             f"draft_counts={[len(d) for d in draft_token_ids]} | "
             #             f"total_drafts={sum(len(d) for d in draft_token_ids)}")
+        elif self.speculative_config.method == "suffix":
+            # Suffix decoding: propose drafts using suffix trees
+            assert isinstance(sampled_token_ids, list)
+            from vllm.v1.spec_decode.suffix_decoding import (
+                SuffixDecodingProposer)
+            assert isinstance(self.drafter, SuffixDecodingProposer)
+            draft_token_ids = self.drafter.propose(
+                input_batch=self.input_batch,
+                sampled_token_ids=sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)

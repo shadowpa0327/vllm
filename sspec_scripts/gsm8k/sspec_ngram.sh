@@ -100,7 +100,7 @@ if [ -n "$SSPEC_NGRAM_PROMPT_LOOKUP_MAX" ]; then
 fi
 
 # Compose run command
-RUN_CMD=(python math_eval.py "${CMD_ARGS[@]}")
+RUN_CMD=(python math_eval_orignal.py "${CMD_ARGS[@]}")
 
 # Run self-spec n-gram test
 echo "Running self-spec n-gram test..."

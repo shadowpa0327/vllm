@@ -182,6 +182,43 @@ def parse_args():
         help="Maximum ngram size for vLLM prompt lookup",
     )
 
+    # vLLM suffix decoding speculative decoding arguments
+    parser.add_argument(
+        "--vllm_enable_suffix",
+        action="store_true",
+        help="Enable suffix decoding speculative decoding in vLLM",
+    )
+    parser.add_argument(
+        "--vllm_suffix_num_speculative_tokens",
+        type=int,
+        default=5,
+        help="Number of speculative tokens for suffix decoding",
+    )
+    parser.add_argument(
+        "--vllm_suffix_max_tree_depth",
+        type=int,
+        default=24,
+        help="Maximum depth for suffix tree pattern matching",
+    )
+    parser.add_argument(
+        "--vllm_suffix_max_cached_requests",
+        type=int,
+        default=10000,
+        help="Maximum number of cached request responses (0 = disable global cache)",
+    )
+    parser.add_argument(
+        "--vllm_suffix_max_spec_factor",
+        type=float,
+        default=1.0,
+        help="Speculation length factor: max_spec_tokens = factor × prefix_match_length",
+    )
+    parser.add_argument(
+        "--vllm_suffix_min_token_prob",
+        type=float,
+        default=0.1,
+        help="Minimum frequency threshold for speculating a token",
+    )
+
     # vLLM EAGLE3 speculative decoding arguments
     parser.add_argument(
         "--vllm_enable_eagle3",
@@ -279,6 +316,67 @@ def parse_args():
         type=int,
         default=1,
         help="Block size for self-spec ngram (default: 1, disables prefix caching)",
+    )
+
+    # vLLM self-spec suffix speculative decoding arguments
+    parser.add_argument(
+        "--vllm_enable_sspec_suffix",
+        action="store_true",
+        help="Enable self-spec with suffix decoding assistance in vLLM (requires V1 engine)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_num_speculative_tokens",
+        type=int,
+        default=6,
+        help="Threshold for ACCUMULATING -> VERIFYING transition (default: 6)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_num_suffix_draft_tokens",
+        type=int,
+        default=3,
+        help="Number of suffix draft tokens per step during ACCUMULATING (default: 3)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_max_tree_depth",
+        type=int,
+        default=24,
+        help="Maximum depth for suffix tree pattern matching (default: 24)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_max_cached_requests",
+        type=int,
+        default=10000,
+        help="Maximum number of cached request responses (default: 10000, 0 = disable global cache)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_max_spec_factor",
+        type=float,
+        default=1.0,
+        help="Speculation length factor (default: 1.0)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_min_token_prob",
+        type=float,
+        default=0.1,
+        help="Minimum frequency threshold for speculating a token (default: 0.1)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_sink_size",
+        type=int,
+        default=8,
+        help="Number of sink blocks for streaming cache (default: 8 blocks)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_recent_ratio",
+        type=float,
+        default=0.10,
+        help="Ratio of recent blocks for streaming cache (default: 0.10)",
+    )
+    parser.add_argument(
+        "--vllm_sspec_suffix_block_size",
+        type=int,
+        default=1,
+        help="Block size for self-spec suffix (default: 1, disables prefix caching)",
     )
 
     # SGLang specific arguments
@@ -485,19 +583,24 @@ def setup(args):
         available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
         if args.use_vllm:
             # Check for mutually exclusive vLLM speculative decoding options
-            spec_options = sum([args.vllm_enable_ngram, args.vllm_enable_eagle3, args.vllm_enable_sspec, args.vllm_enable_sspec_ngram])
+            spec_options = sum([args.vllm_enable_ngram, args.vllm_enable_eagle3, args.vllm_enable_sspec, args.vllm_enable_sspec_ngram, args.vllm_enable_sspec_suffix, args.vllm_enable_suffix])
             if spec_options > 1:
                 raise ValueError(
                     "Cannot enable multiple speculative decoding methods at the same time. "
-                    "Please choose only one: vllm_enable_ngram, vllm_enable_eagle3, vllm_enable_sspec, or vllm_enable_sspec_ngram."
+                    "Please choose only one: vllm_enable_ngram, vllm_enable_eagle3, vllm_enable_sspec, vllm_enable_sspec_ngram, vllm_enable_sspec_suffix, or vllm_enable_suffix."
                 )
 
             # Set environment variables for self-spec methods (must be set before vLLM import)
-            if args.vllm_enable_sspec or args.vllm_enable_sspec_ngram:
+            if args.vllm_enable_sspec or args.vllm_enable_sspec_ngram or args.vllm_enable_sspec_suffix:
                 os.environ["VLLM_USE_V1"] = "1"
                 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
                 os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
-                method_name = "self_spec_ngram" if args.vllm_enable_sspec_ngram else "self_specs"
+                if args.vllm_enable_sspec_ngram:
+                    method_name = "self_spec_ngram"
+                elif args.vllm_enable_sspec_suffix:
+                    method_name = "self_spec_suffix"
+                else:
+                    method_name = "self_specs"
                 print(f"Enabled V1 engine for {method_name}")
                 print(f"  VLLM_USE_V1=1")
                 print(f"  VLLM_ENABLE_V1_MULTIPROCESSING=1")
@@ -525,6 +628,24 @@ def setup(args):
                 vllm_kwargs["disable_log_stats"] = False
                 print(
                     f"Enabled vLLM ngram speculative decoding with config: {speculative_config}"
+                )
+                print(f"Enabled vLLM stat logging for metrics collection")
+
+            # Add suffix decoding speculative decoding config if enabled
+            if args.vllm_enable_suffix:
+                speculative_config = {
+                    "method": "suffix",
+                    "num_speculative_tokens": args.vllm_suffix_num_speculative_tokens,
+                    "suffix_decoding_max_tree_depth": args.vllm_suffix_max_tree_depth,
+                    "suffix_decoding_max_cached_requests": args.vllm_suffix_max_cached_requests,
+                    "suffix_decoding_max_spec_factor": args.vllm_suffix_max_spec_factor,
+                    "suffix_decoding_min_token_prob": args.vllm_suffix_min_token_prob,
+                }
+                vllm_kwargs["speculative_config"] = speculative_config
+                # IMPORTANT: Enable stat logging to access spec decode metrics via get_metrics()
+                vllm_kwargs["disable_log_stats"] = False
+                print(
+                    f"Enabled vLLM suffix decoding with config: {speculative_config}"
                 )
                 print(f"Enabled vLLM stat logging for metrics collection")
 
@@ -632,6 +753,48 @@ def setup(args):
                 print(f"  - Sink size (streaming cache): {args.vllm_sspec_ngram_sink_size} blocks")
                 print(f"  - Recent ratio (streaming cache): {args.vllm_sspec_ngram_recent_ratio} ({args.vllm_sspec_ngram_recent_ratio*100:.1f}%)")
                 print(f"  - Block size: {args.vllm_sspec_ngram_block_size}")
+                print(f"Enabled vLLM stat logging for metrics collection")
+
+            # Add self-spec with suffix decode config if enabled
+            if args.vllm_enable_sspec_suffix:
+                sspec_suffix_config = {
+                    "method": "self_spec_suffix",
+                    "model": None,
+                    "num_speculative_tokens": args.vllm_sspec_suffix_num_speculative_tokens,
+                    "num_suffix_draft_tokens": args.vllm_sspec_suffix_num_suffix_draft_tokens,
+                    "suffix_decoding_max_tree_depth": args.vllm_sspec_suffix_max_tree_depth,
+                    "suffix_decoding_max_cached_requests": args.vllm_sspec_suffix_max_cached_requests,
+                    "suffix_decoding_max_spec_factor": args.vllm_sspec_suffix_max_spec_factor,
+                    "suffix_decoding_min_token_prob": args.vllm_sspec_suffix_min_token_prob,
+                }
+
+                vllm_kwargs["speculative_config"] = sspec_suffix_config
+                # Add streaming cache parameters
+                vllm_kwargs["sink_size"] = args.vllm_sspec_suffix_sink_size
+                vllm_kwargs["recent_ratio"] = args.vllm_sspec_suffix_recent_ratio
+                vllm_kwargs["block_size"] = args.vllm_sspec_suffix_block_size
+                # Enable stat logging to access spec decode metrics
+                vllm_kwargs["disable_log_stats"] = False
+                # Additional V1-specific parameters
+                #vllm_kwargs["enforce_eager"] = False
+                vllm_kwargs["enable_chunked_prefill"] = True
+                vllm_kwargs["enable_prefix_caching"] = False
+                vllm_kwargs["gpu_memory_utilization"] = 0.94
+                vllm_kwargs["max_num_batched_tokens"] = 2048
+                vllm_kwargs["max_num_seqs"] = 256
+                vllm_kwargs["cuda_graph_sizes"] = [1, 2, 4, 8, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024, 1536]
+
+                print(f"Enabled vLLM self-spec with suffix decoding assistance:")
+                print(f"  - Method: self_spec_suffix")
+                print(f"  - Threshold (ACCUMULATING -> VERIFYING): {args.vllm_sspec_suffix_num_speculative_tokens} tokens")
+                print(f"  - Suffix draft tokens per step: {args.vllm_sspec_suffix_num_suffix_draft_tokens} tokens")
+                print(f"  - Max tree depth: {args.vllm_sspec_suffix_max_tree_depth}")
+                print(f"  - Max cached requests: {args.vllm_sspec_suffix_max_cached_requests}")
+                print(f"  - Max spec factor: {args.vllm_sspec_suffix_max_spec_factor}")
+                print(f"  - Min token prob: {args.vllm_sspec_suffix_min_token_prob}")
+                print(f"  - Sink size (streaming cache): {args.vllm_sspec_suffix_sink_size} blocks")
+                print(f"  - Recent ratio (streaming cache): {args.vllm_sspec_suffix_recent_ratio} ({args.vllm_sspec_suffix_recent_ratio*100:.1f}%)")
+                print(f"  - Block size: {args.vllm_sspec_suffix_block_size}")
                 print(f"Enabled vLLM stat logging for metrics collection")
 
             llm = LLM(**vllm_kwargs)
@@ -1011,8 +1174,8 @@ def main(llm, tokenizer, data_name, args):
     ]
     time_use = time.time() - start_time
 
-    # Get vLLM speculation statistics after all generation is done (ngram, EAGLE3, self-spec, or self-spec-ngram)
-    if args.use_vllm and (args.vllm_enable_ngram or args.vllm_enable_eagle3 or args.vllm_enable_sspec or args.vllm_enable_sspec_ngram):
+    # Get vLLM speculation statistics after all generation is done (ngram, EAGLE3, self-spec, self-spec-ngram, self-spec-suffix, or suffix)
+    if args.use_vllm and (args.vllm_enable_ngram or args.vllm_enable_eagle3 or args.vllm_enable_sspec or args.vllm_enable_sspec_ngram or args.vllm_enable_sspec_suffix or args.vllm_enable_suffix):
         try:
             if args.vllm_enable_ngram:
                 spec_method = "ngram"
@@ -1020,6 +1183,10 @@ def main(llm, tokenizer, data_name, args):
                 spec_method = "EAGLE3"
             elif args.vllm_enable_sspec_ngram:
                 spec_method = "self_spec_ngram"
+            elif args.vllm_enable_sspec_suffix:
+                spec_method = "self_spec_suffix"
+            elif args.vllm_enable_suffix:
+                spec_method = "suffix"
             else:
                 spec_method = "self_specs"
 
@@ -1186,8 +1353,12 @@ def main(llm, tokenizer, data_name, args):
                 algorithm = "ngram"
             elif args.use_vllm and args.vllm_enable_sspec_ngram:
                 algorithm = "self_spec_ngram"
+            elif args.use_vllm and args.vllm_enable_sspec_suffix:
+                algorithm = "self_spec_suffix"
             elif args.use_vllm and args.vllm_enable_sspec:
                 algorithm = "self_specs"
+            elif args.use_vllm and args.vllm_enable_suffix:
+                algorithm = "suffix"
             else:
                 algorithm = "Unknown"
 
@@ -1241,6 +1412,14 @@ def main(llm, tokenizer, data_name, args):
                     result_json["speculative_decoding"][
                         "note"
                     ] = "self-speculative decoding with n-gram draft assistance (n-gram drafting metrics)"
+                elif args.use_vllm and args.vllm_enable_sspec_suffix:
+                    result_json["speculative_decoding"][
+                        "note"
+                    ] = "self-speculative decoding with suffix decoding draft assistance (suffix drafting metrics)"
+                elif args.use_vllm and args.vllm_enable_suffix:
+                    result_json["speculative_decoding"][
+                        "note"
+                    ] = "suffix decoding with frequency-based speculation"
 
                 print(f"\n[{algorithm} Spec Decode Statistics (N-gram/Draft)]")
                 print(f"  Draft tokens: {total_draft_tokens:,}")

@@ -156,12 +156,14 @@ class Scheduler(SchedulerInterface):
             cache_size=encoder_cache_size)
 
         speculative_config = vllm_config.speculative_config
+        self.speculative_config = speculative_config
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         # ===== SELF-SPEC ADDITIONS START =====
         self.use_self_specs = False
         self.self_spec_threshold = 0
         self.self_spec_ngram_num_draft_tokens = 0  # For self_spec_ngram
+        self.self_spec_suffix_num_draft_tokens = 0  # For self_spec_suffix
         # Streaming cache parameters (block-based)
         self.streaming_cache_sink_size_blocks = 0
         self.streaming_cache_recent_ratio = 0.0
@@ -178,12 +180,15 @@ class Scheduler(SchedulerInterface):
                 self.self_spec_threshold = self.num_spec_tokens
                 # For self_spec_ngram: get num_ngram_draft_tokens (defaults to 3 if not set)
                 self.self_spec_ngram_num_draft_tokens = getattr(speculative_config, 'num_ngram_draft_tokens', 0) or 0
+                # For self_spec_suffix: get num_suffix_draft_tokens (defaults to 3 if not set)
+                self.self_spec_suffix_num_draft_tokens = getattr(speculative_config, 'num_suffix_draft_tokens', 0) or 0
                 # Load streaming cache config from scheduler_config
                 self.streaming_cache_sink_size_blocks = self.scheduler_config.sink_size
                 self.streaming_cache_recent_ratio = self.scheduler_config.recent_ratio
                 logger.info(
                     f"Self-spec enabled: threshold={self.self_spec_threshold}, "
                     f"num_ngram_draft_tokens={self.self_spec_ngram_num_draft_tokens}, "
+                    f"num_suffix_draft_tokens={self.self_spec_suffix_num_draft_tokens}, "
                     f"streaming_cache: sink_size_blocks={self.streaming_cache_sink_size_blocks}, "
                     f"recent_ratio={self.streaming_cache_recent_ratio}"
                 )
@@ -1133,11 +1138,19 @@ class Scheduler(SchedulerInterface):
                 
                 # case 2: normal spec stats
                 if not self.use_self_specs or (self.use_self_specs and request.self_spec_state != SelfSpecState.VERIFYING):
+
+                    num_spec_tokens = None
+                    if self.speculative_config is not None:
+                        if self.speculative_config.method == "self_spec_suffix":
+                            num_spec_tokens = self.self_spec_suffix_num_draft_tokens
+                        elif self.speculative_config.method == "self_spec_ngram":
+                            num_spec_tokens = self.self_spec_ngram_num_draft_tokens
+                    
                     spec_decoding_stats = self.make_spec_decoding_stats(
                         spec_decoding_stats,
                         num_draft_tokens=num_draft_tokens,
                         num_accepted_tokens=num_accepted,
-                        num_spec_tokens=self.self_spec_ngram_num_draft_tokens if self.self_spec_ngram_num_draft_tokens > 0 else None
+                        num_spec_tokens=num_spec_tokens
                     )
                 
             # SELF-SPEC: Finishing verification, reset state to normal

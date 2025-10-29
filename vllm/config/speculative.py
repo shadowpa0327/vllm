@@ -33,7 +33,7 @@ SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
                             "longcat_flash_mtp", "mtp", "self_specs",
-                            "self_spec_ngram"]
+                            "self_spec_ngram", "self_spec_suffix", "suffix"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -107,10 +107,25 @@ class SpeculativeConfig:
     For 'self_spec_ngram', this controls how many n-gram drafts are proposed
     during ACCUMULATING phase, while num_speculative_tokens controls the
     threshold for transitioning to VERIFYING. If not provided, defaults to 3."""
+    num_suffix_draft_tokens: Optional[int] = None
+    """Number of draft tokens to generate per step for self_spec_suffix.
+    For 'suffix' method, this is controlled by num_speculative_tokens.
+    For 'self_spec_suffix', this controls how many suffix drafts are proposed
+    during ACCUMULATING phase, while num_speculative_tokens controls the
+    threshold for transitioning to VERIFYING. If not provided, defaults to 3."""
 
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
     """
+    # Suffix decoding configuration
+    suffix_decoding_max_tree_depth: int = 24
+    """Maximum depth limiting prefix match + speculation lengths combined."""
+    suffix_decoding_max_cached_requests: int = 10000
+    """Maximum cached request responses; exceeding triggers FIFO eviction."""
+    suffix_decoding_max_spec_factor: float = 1.0
+    """Controls speculation length: max_spec_tokens = factor × prefix_match."""
+    suffix_decoding_min_token_prob: float = 0.1
+    """Minimum frequency threshold for speculating a token."""
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
@@ -248,6 +263,13 @@ class SpeculativeConfig:
                 # Self-spec with n-gram assistance
                 # Keep model as None (uses ngram proposer)
                 self.model = "ngram"
+            elif self.method == "self_spec_suffix":
+                # Self-spec with suffix decode assistance
+                # Keep model as None (uses suffix proposer)
+                self.model = "suffix"
+            elif self.method == "suffix":
+                # Suffix decoding doesn't use a separate model
+                self.model = "suffix"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without "
@@ -307,6 +329,67 @@ class SpeculativeConfig:
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
             # draft related config as None here.
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+        elif self.method == "suffix":
+            # Validate suffix decoding
+            from vllm.utils.import_utils import has_arctic_inference
+            if not has_arctic_inference():
+                raise ImportError(
+                    "Arctic Inference required for suffix decoding. "
+                    "Install: `pip install arctic-inference==0.1.0`"
+                )
+
+            # Set default num_speculative_tokens if not provided
+            if self.num_speculative_tokens is None:
+                self.num_speculative_tokens = 5
+
+            # Validate parameters
+            if self.suffix_decoding_max_tree_depth < 1:
+                raise ValueError("suffix_decoding_max_tree_depth must be >= 1")
+            if self.suffix_decoding_max_cached_requests < 0:
+                raise ValueError("suffix_decoding_max_cached_requests must be >= 0")
+
+            # Use target model config for suffix decoding
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+        elif self.method == "self_spec_suffix":
+            # Validate self-spec with suffix decoding
+            from vllm.utils.import_utils import has_arctic_inference
+            if not has_arctic_inference():
+                raise ImportError(
+                    "Arctic Inference required for self_spec_suffix. "
+                    "Install: `pip install arctic-inference==0.1.0`"
+                )
+
+            # Set default num_speculative_tokens if not provided
+            if self.num_speculative_tokens is None:
+                raise ValueError(
+                    f"num_speculative_tokens must be set for self_spec_suffix")
+                #self.num_speculative_tokens = 6  # Match self_specs default
+
+            # Validate parameters
+            if self.suffix_decoding_max_tree_depth < 1:
+                raise ValueError("suffix_decoding_max_tree_depth must be >= 1")
+            if self.suffix_decoding_max_cached_requests < 0:
+                raise ValueError("suffix_decoding_max_cached_requests must be >= 0")
+
+            # Set num_suffix_draft_tokens for self_spec_suffix
+            if self.num_suffix_draft_tokens is None:
+                raise ValueError(
+                    f"num_suffix_draft_tokens must be set for self_spec_suffix")
+
+            # Validate num_suffix_draft_tokens
+            if self.num_suffix_draft_tokens < 1:
+                raise ValueError(
+                    f"num_suffix_draft_tokens={self.num_suffix_draft_tokens} must be > 0")
+            if self.num_suffix_draft_tokens > self.num_speculative_tokens:
+                logger.warning(
+                    f"num_suffix_draft_tokens={self.num_suffix_draft_tokens} is greater than "
+                    f"num_speculative_tokens={self.num_speculative_tokens}. "
+                    f"This may waste computation as drafts will be capped at threshold.")
+
+            # Use target model config for self-spec suffix
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         else:
@@ -594,11 +677,11 @@ class SpeculativeConfig:
         return self.method in ("eagle", "eagle3", "mtp")
 
     def use_self_specs(self) -> bool:
-        return self.method in ("self_specs", "self_spec_ngram")
+        return self.method in ("self_specs", "self_spec_ngram", "self_spec_suffix")
 
     def __repr__(self) -> str:
         method = self.method
-        if method in ("ngram", "self_specs", "self_spec_ngram"):
+        if method in ("ngram", "self_specs", "self_spec_ngram", "self_spec_suffix", "suffix"):
             model = None
         elif self.draft_model_config is not None:
             model = self.draft_model_config.model
