@@ -517,8 +517,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # for self.model_config.is_attention_free.
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
-
-        assert self.reorder_batch_threshold == 0, "Forced to disable reordering of batch!! Ask Yilong!!!!!!!!!!!!!!!"
+        if self.speculative_config and self.speculative_config.use_self_specs():
+            assert self.reorder_batch_threshold == 0, "Forced to disable reordering of batch!! Ask Yilong!!!!!!!!!!!!!!!"
         if self.reorder_batch_threshold is not None:
             # NOTE(lucas): currently no backend supports the custom masking
             #  required for DCP with q_len > 1, so we assert here. Remove this
