@@ -115,6 +115,56 @@ class SpecDecodingLogging:
         self.reset()
 
 
+class SelfSpecDecodingLogging(SpecDecodingLogging):
+    """Logging for self-speculative decoding metrics.
+
+    Same as SpecDecodingLogging but with a [SELF-SPEC] prefix in logs.
+    """
+
+    def log(self, log_fn=logger.info):
+        if not self.num_drafts:
+            return
+        num_drafts = np.sum(self.num_drafts)
+        num_draft_tokens = np.sum(self.num_draft_tokens)
+        num_accepted_tokens = np.sum(self.num_accepted_tokens)
+        draft_throughput = 0
+        accepted_throughput = 0
+
+        elapsed_time = time.monotonic() - self.last_log_time
+        if elapsed_time > 0:
+            draft_throughput = num_draft_tokens / elapsed_time
+            accepted_throughput = num_accepted_tokens / elapsed_time
+
+        draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens *
+                                 100 if num_draft_tokens > 0 else float("nan"))
+
+        # Conventionally, mean acceptance length includes the bonus token
+        mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
+
+        pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
+        acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
+        rates_str = ", ".join(f"{p:.3f}" for p in acceptance_rates)
+
+        log_fn(
+            "[SELF-SPEC] SpecDecoding metrics: "
+            "Mean acceptance length: %.2f, "
+            "Accepted throughput: %.2f tokens/s, "
+            "Drafted throughput: %.2f tokens/s, "
+            "Accepted: %d tokens, "
+            "Drafted: %d tokens, "
+            "Per-position acceptance rate: %s, "
+            "Avg Draft acceptance rate: %.1f%%",
+            mean_acceptance_length,
+            accepted_throughput,
+            draft_throughput,
+            num_accepted_tokens,
+            num_draft_tokens,
+            rates_str,
+            draft_acceptance_rate,
+        )
+        self.reset()
+
+
 class SpecDecodingProm:
     """Record spec decoding metrics in Prometheus.
 
@@ -172,6 +222,8 @@ class SpecDecodingProm:
         assert speculative_config is not None
         num_spec_tokens = (speculative_config.num_speculative_tokens
                            if self.spec_decoding_enabled else 0)
+        if speculative_config.method == "self_spec_ngram":
+            num_spec_tokens = speculative_config.num_ngram_draft_tokens
         pos_labelnames = labelnames + ["position"]
         base_counter = self._counter_cls(
             name="vllm:spec_decode_num_accepted_tokens_per_pos",
@@ -198,10 +250,69 @@ class SpecDecodingProm:
             spec_decoding_stats.num_draft_tokens)
         self.counter_spec_decode_num_accepted_tokens[engine_idx].inc(
             spec_decoding_stats.num_accepted_tokens)
-        for pos, counter in enumerate(
-                self.
-                counter_spec_decode_num_accepted_tokens_per_pos[engine_idx]):
+        # Only iterate through positions that exist in the stats object
+        # to avoid IndexError when stats array is smaller than counter array
+        num_positions = len(spec_decoding_stats.num_accepted_tokens_per_pos)
+        for pos in range(num_positions):
+            counter = self.counter_spec_decode_num_accepted_tokens_per_pos[engine_idx][pos]
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+
+
+class SelfSpecDecodingProm(SpecDecodingProm):
+    """Prometheus metrics for self-speculative decoding.
+
+    Uses different metric names to avoid conflicts with regular spec decoding.
+    """
+
+    def __init__(
+        self,
+        speculative_config: Optional[SpeculativeConfig],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[str]],
+    ):
+        self.spec_decoding_enabled = speculative_config is not None
+        if not self.spec_decoding_enabled:
+            return
+
+        # Use self_spec prefix to distinguish from regular spec decode metrics
+        counter_drafts = self._counter_cls(
+            name="vllm:self_spec_num_drafts",
+            documentation="Number of self-spec verification batches.",
+            labelnames=labelnames)
+        self.counter_spec_decode_num_drafts = make_per_engine(
+            counter_drafts, per_engine_labelvalues)
+
+        counter_draft_tokens = self._counter_cls(
+            name="vllm:self_spec_num_draft_tokens",
+            documentation="Number of self-spec draft tokens (pending tokens verified).",
+            labelnames=labelnames)
+        self.counter_spec_decode_num_draft_tokens = make_per_engine(
+            counter_draft_tokens, per_engine_labelvalues)
+
+        counter_accepted_tokens = self._counter_cls(
+            name="vllm:self_spec_num_accepted_tokens",
+            documentation="Number of self-spec accepted tokens.",
+            labelnames=labelnames)
+        self.counter_spec_decode_num_accepted_tokens = make_per_engine(
+            counter_accepted_tokens, per_engine_labelvalues)
+
+        assert speculative_config is not None
+        num_spec_tokens = (speculative_config.num_speculative_tokens
+                           if self.spec_decoding_enabled else 0)
+        pos_labelnames = labelnames + ["position"]
+        base_counter = self._counter_cls(
+            name="vllm:self_spec_num_accepted_tokens_per_pos",
+            documentation="Self-spec accepted tokens per draft position.",
+            labelnames=pos_labelnames,
+        )
+        self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
+            int, list[prometheus_client.Counter]] = {
+                idx: [
+                    base_counter.labels(*lv, str(pos))
+                    for pos in range(num_spec_tokens)
+                ]
+                for idx, lv in per_engine_labelvalues.items()
+            }
 
 
 def make_per_engine(counter: prometheus_client.Counter,

@@ -291,8 +291,8 @@ class SpeculativeConfig:
             # Set num_ngram_draft_tokens for self_spec_ngram
             if self.method == "self_spec_ngram":
                 if self.num_ngram_draft_tokens is None:
-                    # Default to 3 draft tokens per step
-                    self.num_ngram_draft_tokens = 3
+                    raise ValueError(
+                        f"num_ngram_draft_tokens must be set for self_spec_ngram")
 
                 # Validate num_ngram_draft_tokens
                 if self.num_ngram_draft_tokens < 1:

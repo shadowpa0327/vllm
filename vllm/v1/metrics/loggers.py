@@ -16,7 +16,9 @@ from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
-from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
+from vllm.v1.spec_decode.metrics import (SelfSpecDecodingLogging,
+                                          SelfSpecDecodingProm,
+                                          SpecDecodingLogging, SpecDecodingProm)
 
 logger = init_logger(__name__)
 
@@ -61,6 +63,7 @@ class LoggingStatLogger(StatLoggerBase):
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
+        self.spec_decoding_logging_self_spec = SelfSpecDecodingLogging()
         kv_tranfer_config = self.vllm_config.kv_transfer_config
         self.kv_transfer_logging = KVConnectorLogging(kv_tranfer_config)
         self.last_prompt_throughput: float = 0.0
@@ -100,6 +103,9 @@ class LoggingStatLogger(StatLoggerBase):
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_logging.observe(
                     scheduler_stats.spec_decoding_stats)
+            if scheduler_stats.self_spec_spec_decoding_stats is not None:
+                self.spec_decoding_logging_self_spec.observe(
+                    scheduler_stats.self_spec_spec_decoding_stats)
             if kv_connector_stats := scheduler_stats.kv_connector_stats:
                 self.kv_transfer_logging.observe(kv_connector_stats)
             self.last_scheduler_stats = scheduler_stats
@@ -140,6 +146,7 @@ class LoggingStatLogger(StatLoggerBase):
             self.prefix_caching_metrics.hit_rate * 100,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
+        self.spec_decoding_logging_self_spec.log(log_fn=log_fn)
         self.kv_transfer_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
@@ -180,6 +187,11 @@ class PrometheusStatLogger(StatLoggerBase):
         }
 
         self.spec_decoding_prom = self._spec_decoding_cls(
+            vllm_config.speculative_config, labelnames,
+            spec_decode_labelvalues)
+
+        # Self-spec prometheus logger (uses different metric names)
+        self.spec_decoding_prom_self_spec = SelfSpecDecodingProm(
             vllm_config.speculative_config, labelnames,
             spec_decode_labelvalues)
 
@@ -553,6 +565,9 @@ class PrometheusStatLogger(StatLoggerBase):
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats, engine_idx)
+            if scheduler_stats.self_spec_spec_decoding_stats is not None:
+                self.spec_decoding_prom_self_spec.observe(
+                    scheduler_stats.self_spec_spec_decoding_stats, engine_idx)
 
         if iteration_stats is None:
             return

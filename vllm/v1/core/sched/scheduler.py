@@ -161,6 +161,7 @@ class Scheduler(SchedulerInterface):
         # ===== SELF-SPEC ADDITIONS START =====
         self.use_self_specs = False
         self.self_spec_threshold = 0
+        self.self_spec_ngram_num_draft_tokens = 0  # For self_spec_ngram
         # Streaming cache parameters (block-based)
         self.streaming_cache_sink_size_blocks = 0
         self.streaming_cache_recent_ratio = 0.0
@@ -175,11 +176,14 @@ class Scheduler(SchedulerInterface):
             elif hasattr(speculative_config, 'use_self_specs') and speculative_config.use_self_specs():
                 self.use_self_specs = True
                 self.self_spec_threshold = self.num_spec_tokens
+                # For self_spec_ngram: get num_ngram_draft_tokens (defaults to 3 if not set)
+                self.self_spec_ngram_num_draft_tokens = getattr(speculative_config, 'num_ngram_draft_tokens', 0) or 0
                 # Load streaming cache config from scheduler_config
                 self.streaming_cache_sink_size_blocks = self.scheduler_config.sink_size
                 self.streaming_cache_recent_ratio = self.scheduler_config.recent_ratio
                 logger.info(
                     f"Self-spec enabled: threshold={self.self_spec_threshold}, "
+                    f"num_ngram_draft_tokens={self.self_spec_ngram_num_draft_tokens}, "
                     f"streaming_cache: sink_size_blocks={self.streaming_cache_sink_size_blocks}, "
                     f"recent_ratio={self.streaming_cache_recent_ratio}"
                 )
@@ -1079,6 +1083,7 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
+        self_spec_spec_decoding_stats: Optional[SpecDecodingStats] = None
         kv_connector_stats = (kv_connector_output.kv_connector_stats
                               if kv_connector_output else None)
 
@@ -1112,17 +1117,30 @@ class Scheduler(SchedulerInterface):
                 # num_computed_tokens is decreased by the number of rejected
                 # tokens.
                 request.num_computed_tokens -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted)
+
+                # case 1: self-spec stats
+                if self.use_self_specs and request.self_spec_state == SelfSpecState.VERIFYING:
+                    #print(f"[DEBUG] make_spec_decoding_stats for self-spec stats | num_draft_tokens={num_draft_tokens} | num_accepted_tokens={num_accepted}")
+                    self_spec_spec_decoding_stats = self.make_spec_decoding_stats(
+                        self_spec_spec_decoding_stats,
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted,
+                        num_spec_tokens=self.self_spec_threshold if self.self_spec_threshold > 0 else None)
+                
+                # case 2: normal spec stats
+                if not self.use_self_specs or (self.use_self_specs and request.self_spec_state != SelfSpecState.VERIFYING):
+                    spec_decoding_stats = self.make_spec_decoding_stats(
+                        spec_decoding_stats,
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted,
+                        num_spec_tokens=self.self_spec_ngram_num_draft_tokens if self.self_spec_ngram_num_draft_tokens > 0 else None
+                    )
                 
             # SELF-SPEC: Finishing verification, reset state to normal
             if self.use_self_specs and request.self_spec_state == SelfSpecState.VERIFYING:
                 # Flush the processed spec_token_ids
                 request.spec_token_ids = []
                 request.self_spec_state = SelfSpecState.NORMAL
-                #logger.debug(f"Request {request.request_id}: verification completed, state reset to NORMAL")
 
             stopped = False
             new_logprobs = None
@@ -1135,12 +1153,6 @@ class Scheduler(SchedulerInterface):
             if new_token_ids:
                 new_token_ids, stopped, should_flip_to_accumulating = self._update_request_with_output(
                     request, new_token_ids)
-                # if self.use_self_specs:
-                #     logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: update_from_output | "
-                #                  f"state={request.self_spec_state} | "
-                #                  f"output_tokens={len(request.output_token_ids)} | "
-                #                  f"pending={len(request._pending_output_tokens)}")
-                #breakpoint()
             # Stop checking for pooler models.
             pooler_output = None
             if pooler_outputs:
@@ -1267,8 +1279,8 @@ class Scheduler(SchedulerInterface):
 
         if (stats := self.make_stats(spec_decoding_stats,
                                      kv_connector_stats,
-                                     num_cached_reqs_in_accumulating,
-                                     num_cached_reqs_in_verifying)) is not None:
+                                    # ===== SELF-SPEC =====
+                                     self_spec_spec_decoding_stats)) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
@@ -1466,8 +1478,7 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
         kv_connector_stats: Optional[KVConnectorStats] = None,
         # ===== SELF-SPEC ADDITIONS =====
-        num_cached_reqs_in_accumulating: int = 0,
-        num_cached_reqs_in_verifying: int = 0,
+        self_spec_spec_decoding_stats: Optional[SpecDecodingStats] = None,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
@@ -1483,20 +1494,23 @@ class Scheduler(SchedulerInterface):
                               kv_connector_stats=kv_connector_stats.data
                               if kv_connector_stats else None,
                               # ===== SELF-SPEC ADDITIONS =====
-                              num_cached_reqs_in_accumulating=num_cached_reqs_in_accumulating,
-                              num_cached_reqs_in_verifying=num_cached_reqs_in_verifying)
+                              self_spec_spec_decoding_stats=self_spec_spec_decoding_stats)
 
     def make_spec_decoding_stats(
         self,
         spec_decoding_stats: Optional[SpecDecodingStats],
         num_draft_tokens: int,
         num_accepted_tokens: int,
+        num_spec_tokens: Optional[int] = None,
     ) -> Optional[SpecDecodingStats]:
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
-            #logger.debug("self.num_spec_tokens", self.num_spec_tokens, "num_draft_tokens", num_draft_tokens, "num_accepted_tokens", num_accepted_tokens)
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+            # CRITICAL: The size MUST match what Prometheus counters were initialized with
+            # Otherwise we get IndexError when observing per-position stats
+            # Use provided num_spec_tokens, or fall back to self.num_spec_tokens
+            max_num_spec_tokens = num_spec_tokens if num_spec_tokens is not None else self.num_spec_tokens
+            spec_decoding_stats = SpecDecodingStats.new(max_num_spec_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted_tokens)

@@ -187,7 +187,7 @@ def main():
     llm = LLM(**llm_kwargs)
 
     # Set up sampling parameters
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=128, top_p=1.0, ignore_eos=True)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=1024, top_p=1.0, ignore_eos=True)
 
 
     # Generate outputs
@@ -227,30 +227,46 @@ def main():
         try:
             metrics = llm.get_metrics()
 
-            # Display self-spec request state statistics from Prometheus metrics
+            # Display statistics from Prometheus metrics
             print("\n" + "="*80)
-            print("SELF-SPEC STATISTICS FROM PROMETHEUS METRICS")
+            print("STATISTICS FROM PROMETHEUS METRICS")
             print("="*80)
 
             # Extract metrics from Prometheus snapshot (similar to math_eval.py)
+            # Normal spec decode metrics (n-gram drafting)
             total_draft_tokens = 0
             total_accepted_tokens = 0
             num_drafts = 0
 
+            # Self-spec metrics (verification)
+            self_spec_draft_tokens = 0
+            self_spec_accepted_tokens = 0
+            self_spec_num_drafts = 0
+
             for metric in metrics:
                 metric_name = metric.name if hasattr(metric, 'name') else str(metric)
 
-                if 'spec_decode_num_draft_tokens' in metric_name and hasattr(metric, 'value'):
+                # Normal spec decode metrics
+                if metric_name == 'vllm:spec_decode_num_draft_tokens' and hasattr(metric, 'value'):
                     total_draft_tokens = int(metric.value)
-                elif 'spec_decode_num_accepted_tokens' in metric_name and 'per_pos' not in metric_name and hasattr(metric, 'value'):
+                elif metric_name == 'vllm:spec_decode_num_accepted_tokens' and hasattr(metric, 'value'):
                     total_accepted_tokens = int(metric.value)
-                elif 'spec_decode_num_drafts' in metric_name and hasattr(metric, 'value'):
+                elif metric_name == 'vllm:spec_decode_num_drafts' and hasattr(metric, 'value'):
                     num_drafts = int(metric.value)
 
+                # Self-spec metrics
+                elif metric_name == 'vllm:self_spec_num_draft_tokens' and hasattr(metric, 'value'):
+                    self_spec_draft_tokens = int(metric.value)
+                elif metric_name == 'vllm:self_spec_num_accepted_tokens' and hasattr(metric, 'value'):
+                    self_spec_accepted_tokens = int(metric.value)
+                elif metric_name == 'vllm:self_spec_num_drafts' and hasattr(metric, 'value'):
+                    self_spec_num_drafts = int(metric.value)
+
+            # Print normal spec decode metrics (n-gram drafting)
             if total_draft_tokens > 0 or total_accepted_tokens > 0:
                 acceptance_rate = (total_accepted_tokens / total_draft_tokens) if total_draft_tokens > 0 else 0.0
 
-                print("SPECULATIVE DECODING METRICS:")
+                print("\nSPEC DECODE METRICS (N-gram Drafting):")
                 print(f"  Draft tokens proposed: {total_draft_tokens:,}")
                 print(f"  Tokens accepted: {total_accepted_tokens:,}")
                 print(f"  Tokens rejected: {total_draft_tokens - total_accepted_tokens:,}")
@@ -259,10 +275,27 @@ def main():
                 if num_drafts > 0:
                     print(f"  Avg draft tokens per draft: {total_draft_tokens / num_drafts:.2f}")
                     print(f"  Avg accepted per draft: {total_accepted_tokens / num_drafts:.2f}")
-                print()
-            else:
-                print("No speculative decoding metrics available yet.")
-                print()
+                    print(f"  Mean acceptance length: {1 + (total_accepted_tokens / num_drafts):.2f}")
+
+            # Print self-spec metrics (verification)
+            if self_spec_draft_tokens > 0 or self_spec_accepted_tokens > 0:
+                self_spec_acceptance_rate = (self_spec_accepted_tokens / self_spec_draft_tokens) if self_spec_draft_tokens > 0 else 0.0
+
+                print("\nSELF-SPEC METRICS (Verification):")
+                print(f"  Draft tokens proposed: {self_spec_draft_tokens:,}")
+                print(f"  Tokens accepted: {self_spec_accepted_tokens:,}")
+                print(f"  Tokens rejected: {self_spec_draft_tokens - self_spec_accepted_tokens:,}")
+                print(f"  Acceptance rate: {self_spec_acceptance_rate * 100:.2f}%")
+                print(f"  Number of verifications: {self_spec_num_drafts:,}")
+                if self_spec_num_drafts > 0:
+                    print(f"  Avg draft tokens per verification: {self_spec_draft_tokens / self_spec_num_drafts:.2f}")
+                    print(f"  Avg accepted per verification: {self_spec_accepted_tokens / self_spec_num_drafts:.2f}")
+                    print(f"  Mean acceptance length: {1 + (self_spec_accepted_tokens / self_spec_num_drafts):.2f}")
+
+            if total_draft_tokens == 0 and self_spec_draft_tokens == 0:
+                print("\nNo speculative decoding metrics available yet.")
+
+            print()
 
             # # Show iteration-by-iteration breakdown (first 10 and last 10 iterations)
             # print("ITERATION-BY-ITERATION BREAKDOWN:")
@@ -313,11 +346,17 @@ def main():
 
 
 def print_metrics(metrics):
-    """Print self-speculative decoding metrics."""
+    """Print spec decoding metrics (both normal spec decode and self-spec)."""
+    # Normal spec decode metrics
     num_drafts = num_accepted = 0
-    acceptance_counts = [0] * 312 # Track acceptance at each position
+    acceptance_counts = [0] * 312  # Track acceptance at each position
+
+    # Self-spec metrics
+    self_spec_num_drafts = self_spec_num_accepted = 0
+    self_spec_acceptance_counts = [0] * 312  # Track acceptance at each position
 
     for metric in metrics:
+        # Normal spec decode metrics
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
             num_drafts += metric.value
@@ -329,19 +368,48 @@ def print_metrics(metrics):
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
 
+        # Self-spec metrics
+        elif metric.name == "vllm:self_spec_num_drafts":
+            assert isinstance(metric, Counter)
+            self_spec_num_drafts += metric.value
+        elif metric.name == "vllm:self_spec_num_accepted_tokens":
+            assert isinstance(metric, Counter)
+            self_spec_num_accepted += metric.value
+        elif metric.name == "vllm:self_spec_num_accepted_tokens_per_pos":
+            assert isinstance(metric, Vector)
+            for pos in range(len(metric.values)):
+                self_spec_acceptance_counts[pos] += metric.values[pos]
+
+    # Print normal spec decode metrics (n-gram drafting)
     if num_drafts > 0:
         print(f"\n{'='*60}")
-        print("SELF-SPECULATIVE DECODING METRICS")
+        print("SPEC DECODE METRICS (N-gram Drafting)")
         print(f"{'='*60}")
         print(f"Mean acceptance length: {1 + (num_accepted / num_drafts):.2f}")
         print(f"Total drafts: {num_drafts}")
         print(f"Total accepted: {num_accepted}")
+        print(f"Acceptance rate: {(num_accepted / (num_drafts * 3)):.2%}")  # Assuming 3 tokens per draft
 
         print("\nAcceptance rate by token position:")
         for i in range(len(acceptance_counts)):
             if acceptance_counts[i] > 0:
                 rate = acceptance_counts[i] / num_drafts
                 print(f"  Position {i}: {rate:.3f} ({acceptance_counts[i]}/{num_drafts})")
+
+    # Print self-spec metrics (verification)
+    if self_spec_num_drafts > 0:
+        print(f"\n{'='*60}")
+        print("SELF-SPEC METRICS (Verification)")
+        print(f"{'='*60}")
+        print(f"Mean acceptance length: {1 + (self_spec_num_accepted / self_spec_num_drafts):.2f}")
+        print(f"Total drafts: {self_spec_num_drafts}")
+        print(f"Total accepted: {self_spec_num_accepted}")
+
+        print("\nAcceptance rate by token position:")
+        for i in range(len(self_spec_acceptance_counts)):
+            if self_spec_acceptance_counts[i] > 0:
+                rate = self_spec_acceptance_counts[i] / self_spec_num_drafts
+                print(f"  Position {i}: {rate:.3f} ({self_spec_acceptance_counts[i]}/{self_spec_num_drafts})")
 
 
 if __name__ == "__main__":

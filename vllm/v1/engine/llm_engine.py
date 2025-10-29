@@ -121,12 +121,12 @@ class LLMEngine:
         )
 
         self.logger_manager: Optional[StatLoggerManager] = None
-        # Create self-spec stat logger if self-spec is enabled
-        self.stat_logger: Optional[SelfSpecStatLogger] = None
-        if (vllm_config.speculative_config is not None
-                and vllm_config.speculative_config.method == "self_specs"):
-            self.stat_logger = SelfSpecStatLogger(vllm_config=vllm_config,
-                                                  engine_index=0)
+        # # Create self-spec stat logger if self-spec is enabled
+        # self.stat_logger: Optional[SelfSpecStatLogger] = None
+        # if (vllm_config.speculative_config is not None
+        #         and vllm_config.speculative_config.method == "self_specs"):
+        #     self.stat_logger = SelfSpecStatLogger(vllm_config=vllm_config,
+        #                                           engine_index=0)
 
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
@@ -291,12 +291,12 @@ class LLMEngine:
             )
             self.do_log_stats_with_interval()
 
-        # 5) Record self-spec stats if enabled
-        if self.stat_logger is not None and outputs.scheduler_stats is not None:
-            self.stat_logger.record(
-                scheduler_stats=outputs.scheduler_stats,
-                iteration_stats=iteration_stats,
-            )
+        # # 5) Record self-spec stats if enabled
+        # if self.stat_logger is not None and outputs.scheduler_stats is not None:
+        #     self.stat_logger.record(
+        #         scheduler_stats=outputs.scheduler_stats,
+        #         iteration_stats=iteration_stats,
+        #     )
 
         return processed_outputs.request_outputs
 
