@@ -499,7 +499,9 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             #while self.waiting and token_budget > 0:
-            while self.waiting and token_budget > 0 and self.kv_cache_manager.usage < 0.9:
+            # SELF-SPEC: Only check KV cache usage limit when self-spec is enabled
+            while (self.waiting and token_budget > 0 and
+                   (not self.use_self_specs or self.kv_cache_manager.usage < 0.9)):
             # (self.kv_cache_manager.block_pool.num_gpu_blocks) * 0.1
                 if len(self.running) == self.max_num_running_reqs:
                     break

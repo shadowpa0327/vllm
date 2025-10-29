@@ -9,23 +9,10 @@ echo "Testing vLLM Self-Spec with N-gram Assistance"
 echo "================================================"
 
 # Configuration (using same defaults as run_baseline_snapshot.sh)
-MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-14B}"
+MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-8B}"
 PROMPT_TYPE="${PROMPT_TYPE:-qwen3-math-thinking}"
 NUM_SAMPLES="${NUM_SAMPLES:--1}"
-REPEAT_DATASET="${REPEAT_DATASET:-10}"
-
-# Extract model name from path
-MODEL_NAME=$(basename "$MODEL_PATH")
-
-# Determine TP size from CUDA_VISIBLE_DEVICES
-if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
-    TP_SIZE=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
-else
-    TP_SIZE=1  # default
-fi
-
-# Construct output directory with model name, TP, and repeat info
-OUTPUT_DIR="outputs/sspec_ngram_${MODEL_NAME}_tp${TP_SIZE}_repeat${REPEAT_DATASET}_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="outputs/sspec_ngram_$(date +%Y%m%d_%H%M%S)"
 
 # Test datasets (quick ones first)
 DATASETS="${DATASETS:-aime24}"
@@ -39,22 +26,12 @@ SSPEC_NGRAM_SINK_SIZE="${SSPEC_NGRAM_SINK_SIZE:-32}"                            
 SSPEC_NGRAM_RECENT_RATIO="${SSPEC_NGRAM_RECENT_RATIO:-0.05}"                    # Streaming cache recent ratio
 SSPEC_NGRAM_BLOCK_SIZE="${SSPEC_NGRAM_BLOCK_SIZE:-1}"                           # Block size (1 disables prefix caching)
 
-# Profiling options
-ENABLE_NSYS_PROFILING="${ENABLE_NSYS_PROFILING:-0}"
-NSYS_PROFILE_OUTPUT="${NSYS_PROFILE_OUTPUT:-self_spec_ngram_qwen3_8b_tp1}"
-NSYS_PROFILE_FORCE="${NSYS_PROFILE_FORCE:-true}"
-
 echo ""
 echo "Configuration:"
 echo "  Model: $MODEL_PATH"
 echo "  Datasets: $DATASETS"
 echo "  Samples per dataset: $NUM_SAMPLES"
 echo "  Output: $OUTPUT_DIR"
-if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; then
-    echo "  Nsight Systems profiling: enabled (output: $NSYS_PROFILE_OUTPUT)"
-else
-    echo "  Nsight Systems profiling: disabled"
-fi
 echo ""
 echo "Self-Spec N-gram Parameters:"
 echo "  Speculative tokens threshold (ACCUMULATING->VERIFYING): $SSPEC_NGRAM_NUM_SPECULATIVE_TOKENS"
@@ -100,7 +77,7 @@ CMD_ARGS=(
     --vllm_sspec_ngram_block_size "$SSPEC_NGRAM_BLOCK_SIZE"
     --save_outputs
     --overwrite
-    --repeat_dataset "$REPEAT_DATASET"
+    --repeat_dataset 10
 )
 
 # Add optional lookup window parameters if specified
@@ -111,31 +88,16 @@ if [ -n "$SSPEC_NGRAM_PROMPT_LOOKUP_MAX" ]; then
     CMD_ARGS+=(--vllm_sspec_ngram_prompt_lookup_max "$SSPEC_NGRAM_PROMPT_LOOKUP_MAX")
 fi
 
-# Compose run command
-RUN_CMD=(python math_eval.py "${CMD_ARGS[@]}")
-
 # Run self-spec n-gram test
 echo "Running self-spec n-gram test..."
 echo ""
 
-if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; then
-    echo "Profiling with Nsight Systems (delay=360s, duration=10s)"
-    VLLM_NVTX_SCOPES_FOR_PROFILING=1 \
-    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}" \
-    TOKENIZERS_PARALLELISM=false \
-    nsys profile \
-        --trace-fork-before-exec=true \
-        --cuda-graph-trace=node \
-        --delay=600 \
-        --duration=10 \
-        -o "$NSYS_PROFILE_OUTPUT" \
-        -f "$NSYS_PROFILE_FORCE" \
-        "${RUN_CMD[@]}"
-else
-    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}" \
-    TOKENIZERS_PARALLELISM=false \
-    "${RUN_CMD[@]}"
-fi
+#CUDA_VISIBLE_DEVICES="0,1" \
+#python math_eval.py "${CMD_ARGS[@]}"
+#nsys profile -t cuda,nvtx,osrt --trace-fork-before-exec=true --cuda-graph-trace=node --delay=600 --duration=40 python math_eval.py "${CMD_ARGS[@]}"
+CUDA_VISIBLE_DEVICES="1" \
+ VLLM_NVTX_SCOPES_FOR_PROFILING=1 nsys profile --trace-fork-before-exec=true --cuda-graph-trace=node --delay=360 --duration=10 -o self_spec_ngram_qwen3_8b_tp1 -f true python math_eval.py "${CMD_ARGS[@]}"
+
 
 echo ""
 echo "================================================"
@@ -163,6 +125,5 @@ echo ""
 
 echo "To compare with baseline or regular self-spec:"
 echo "  export SSPEC_NGRAM_DIR='$OUTPUT_DIR'"
-echo "  # Then run comparison script with $BASELINE_DIR, $SSPEC_DIR, and $SSPEC_NGRAM_DIR"
+echo "  # Then run comparison script with \$BASELINE_DIR, \$SSPEC_DIR, and \$SSPEC_NGRAM_DIR"
 echo ""
-

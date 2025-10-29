@@ -1,14 +1,14 @@
 #!/bin/bash
-# run_sspec_test.sh
-# Test vLLM self-speculative decoding on AIME24 benchmark
+# vanilla_vllm.sh
+# Test pure vLLM (baseline without speculative decoding) on AIME24 benchmark
 
 set -e
 
 echo "================================================"
-echo "Testing vLLM Self-Speculative Decoding - AIME24"
+echo "Testing Pure vLLM (Baseline) - AIME24"
 echo "================================================"
 
-# Configuration (using same defaults as run_baseline_snapshot.sh)
+# Configuration (using same defaults as other scripts)
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3-14B}"
 PROMPT_TYPE="${PROMPT_TYPE:-qwen3-math-thinking}"
 NUM_SAMPLES="${NUM_SAMPLES:--1}"
@@ -25,16 +25,10 @@ else
 fi
 
 # Construct output directory with model name, TP, and repeat info
-OUTPUT_DIR="outputs/sspec_${MODEL_NAME}_tp${TP_SIZE}_repeat${REPEAT_DATASET}_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="outputs/vanilla_vllm_${MODEL_NAME}_tp${TP_SIZE}_repeat${REPEAT_DATASET}_$(date +%Y%m%d_%H%M%S)"
 
 # Test datasets
 DATASETS="aime24"
-
-# Self-spec parameters (streaming cache configuration)
-SSPEC_NUM_TOKENS="${SSPEC_NUM_TOKENS:-8}"
-SSPEC_SINK_SIZE="${SSPEC_SINK_SIZE:-32}"           # blocks (32 blocks with block_size=1)
-SSPEC_RECENT_RATIO="${SSPEC_RECENT_RATIO:-0.05}"  # ratio (5% of computed tokens)
-SSPEC_BLOCK_SIZE="${SSPEC_BLOCK_SIZE:-1}"
 
 # Profiling options
 ENABLE_NSYS_PROFILING="${ENABLE_NSYS_PROFILING:-0}"
@@ -45,24 +39,22 @@ echo "  Model: $MODEL_PATH"
 echo "  Datasets: $DATASETS"
 echo "  Samples per dataset: $NUM_SAMPLES"
 echo "  Output: $OUTPUT_DIR"
+echo "  TP size: $TP_SIZE"
+echo "  Repeat dataset: $REPEAT_DATASET"
 if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; then
     echo "  Nsight Systems profiling: enabled"
 else
     echo "  Nsight Systems profiling: disabled"
 fi
 echo ""
-echo "Self-Spec Parameters (Streaming Cache):"
-echo "  Num speculative tokens: $SSPEC_NUM_TOKENS"
-echo "  Sink size: $SSPEC_SINK_SIZE blocks"
-echo "  Recent ratio: $SSPEC_RECENT_RATIO ($(echo "$SSPEC_RECENT_RATIO * 100" | bc)% of computed tokens)"
-echo "  Block size: $SSPEC_BLOCK_SIZE"
+echo "Mode: Pure vLLM (no speculative decoding)"
 echo ""
 
 # Ensure we're in the correct directory
 cd /home/ubuntu/vllm/math_benchmarks_backup1022
 
-# Run self-spec test
-echo "Running self-spec test..."
+# Run vanilla vLLM test
+echo "Running pure vLLM baseline test..."
 echo ""
 
 if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; then
@@ -75,7 +67,7 @@ if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; 
         --cuda-graph-trace=node \
         --delay=360 \
         --duration=10 \
-        python math_eval.py \
+        python math_eval_orignal.py \
         --model_name_or_path "$MODEL_PATH" \
         --data_names "$DATASETS" \
         --output_dir "$OUTPUT_DIR" \
@@ -87,18 +79,13 @@ if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; 
         --use_vllm \
         --apply_chat_template \
         --enable_thinking \
-        --vllm_enable_sspec \
-        --vllm_sspec_num_speculative_tokens "$SSPEC_NUM_TOKENS" \
-        --vllm_sspec_sink_size "$SSPEC_SINK_SIZE" \
-        --vllm_sspec_recent_ratio "$SSPEC_RECENT_RATIO" \
-        --vllm_sspec_block_size "$SSPEC_BLOCK_SIZE" \
         --save_outputs \
         --overwrite \
         --repeat_dataset "$REPEAT_DATASET"
 else
     CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" \
     TOKENIZERS_PARALLELISM=false \
-    python math_eval.py \
+    python math_eval_orignal.py \
         --model_name_or_path "$MODEL_PATH" \
         --data_names "$DATASETS" \
         --output_dir "$OUTPUT_DIR" \
@@ -110,11 +97,6 @@ else
         --use_vllm \
         --apply_chat_template \
         --enable_thinking \
-        --vllm_enable_sspec \
-        --vllm_sspec_num_speculative_tokens "$SSPEC_NUM_TOKENS" \
-        --vllm_sspec_sink_size "$SSPEC_SINK_SIZE" \
-        --vllm_sspec_recent_ratio "$SSPEC_RECENT_RATIO" \
-        --vllm_sspec_block_size "$SSPEC_BLOCK_SIZE" \
         --save_outputs \
         --overwrite \
         --repeat_dataset "$REPEAT_DATASET"
@@ -122,7 +104,7 @@ fi
 
 echo ""
 echo "================================================"
-echo "Self-spec test results saved to: $OUTPUT_DIR"
+echo "Pure vLLM baseline results saved to: $OUTPUT_DIR"
 echo "================================================"
 echo ""
 echo "Results summary:"
@@ -134,17 +116,17 @@ for dataset in $(echo $DATASETS | tr ',' ' '); do
 done
 echo ""
 
-# Show self-spec metrics if available
-echo "Self-spec metrics:"
+# Show throughput metrics if available
+echo "Throughput metrics:"
 for dataset in $(echo $DATASETS | tr ',' ' '); do
     if [ -f "$OUTPUT_DIR/$dataset"/*_metrics.json ]; then
         echo "  $dataset:"
-        jq -r '.speculative_decoding // "No spec metrics found"' "$OUTPUT_DIR/$dataset"/*_metrics.json 2>/dev/null || echo "    N/A"
+        jq -r '.throughput // "No throughput metrics found"' "$OUTPUT_DIR/$dataset"/*_metrics.json 2>/dev/null || echo "    N/A"
     fi
 done
 echo ""
 
-echo "To compare with baseline:"
-echo "  export SSPEC_DIR='$OUTPUT_DIR'"
-echo "  # Then run comparison script with \$BASELINE_DIR and \$SSPEC_DIR"
+echo "To compare with speculative decoding methods:"
+echo "  export BASELINE_DIR='$OUTPUT_DIR'"
+echo "  # Then run comparison with \$SSPEC_DIR, \$NGRAM_DIR, etc."
 echo ""
