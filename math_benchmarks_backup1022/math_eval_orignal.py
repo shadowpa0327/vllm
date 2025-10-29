@@ -504,6 +504,7 @@ def setup(args):
                 "pipeline_parallel_size": args.pipeline_parallel_size,
                 "trust_remote_code": True,
                 "enable_prefix_caching": False,
+                "disable_log_stats": False,
             }
 
             # Add ngram speculative decoding config if enabled

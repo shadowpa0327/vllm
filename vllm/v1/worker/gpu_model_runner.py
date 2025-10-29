@@ -1307,9 +1307,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Compute recent_sizes on GPU from seq_lens to avoid CPU overhead
                 # Note: seq_lens is int32, recent_ratio is float, result needs to be int32
                 # PyTorch requires explicit .int() conversion; torch.mul with out= doesn't support dtype casting
-                self.recent_sizes.gpu[:num_reqs] = (
-                    self.seq_lens.gpu[:num_reqs].float() *
-                    self.vllm_config.scheduler_config.recent_ratio).int()
+                seq_lens_gpu = self.seq_lens.gpu[:num_reqs]
+                recent_sizes = self.recent_sizes.gpu[:num_reqs]
+                recent_ratio = self.vllm_config.scheduler_config.recent_ratio
+
+                recent_sizes.copy_((seq_lens_gpu.float() * recent_ratio).int())
+                # For shorter sequences, clamp recent sizes to full sequence length
+                clamp_mask = seq_lens_gpu < 2048
+                recent_sizes[clamp_mask] = seq_lens_gpu[clamp_mask]
 
                 # Get GPU tensor views
                 sink_sizes_gpu = self.sink_sizes.gpu[:num_reqs]
