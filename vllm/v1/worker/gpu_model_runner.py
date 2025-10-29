@@ -1281,8 +1281,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_common_prefix_blocks = (
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
-
-            use_selective_kv = self.vllm_config.speculative_config.use_self_specs()
+            
+            if self.speculative_config and self.speculative_config.use_self_specs():
+                use_selective_kv = True
+            else:
+                use_selective_kv = False
 
             # ===== STREAMING CACHE: Build tensors for CommonAttentionMetadata =====
             sink_sizes_gpu = None

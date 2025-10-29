@@ -917,6 +917,10 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+        scheduler_group.add_argument("--sink-size",
+                                     **scheduler_kwargs["sink_size"])
+        scheduler_group.add_argument("--recent-ratio",
+                                     **scheduler_kwargs["recent_ratio"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1380,6 +1384,8 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            sink_size=self.sink_size,
+            recent_ratio=self.recent_ratio,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
