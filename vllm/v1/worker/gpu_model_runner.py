@@ -99,6 +99,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.request import SelfSpecState
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
@@ -289,6 +290,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config,
                     device=self.device)  # type: ignore
+            elif self.speculative_config.method == "self_specs":
+                # NOTE(brian1009): self_specs does not need drafter
+                self.drafter = None
+            elif self.speculative_config.method == "self_spec_ngram":
+                # Self-spec with n-gram assistance during ACCUMULATING phase
+                self.drafter = NgramProposer(self.vllm_config)
+                logger.info(f"[SELF_SPEC_NGRAM] Initialized NgramProposer | "
+                            f"k={self.drafter.k} (num_ngram_draft_tokens) | "
+                            f"min_n={self.drafter.min_n} | max_n={self.drafter.max_n}")
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
@@ -366,6 +376,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                          dtype=torch.int32)
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
+
+        # Streaming cache buffers (for self-speculative decoding)
+        self.sink_sizes = self._make_buffer(self.max_num_reqs,
+                                           dtype=torch.int32)
+        self.recent_sizes = self._make_buffer(self.max_num_reqs,
+                                             dtype=torch.int32)
+        self.full_kv_start_offset = self._make_buffer(self.max_num_reqs,
+                                                      dtype=torch.int32)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -500,6 +518,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
+        assert self.reorder_batch_threshold == 0, "Forced to disable reordering of batch!! Ask Yilong!!!!!!!!!!!!!!!"
         if self.reorder_batch_threshold is not None:
             # NOTE(lucas): currently no backend supports the custom masking
             #  required for DCP with q_len > 1, so we assert here. Remove this
@@ -536,6 +555,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
+        
+        # for req_id, req_state in self.requests.items():
+        #     print(f"[update_states] request {req_id}: {req_state.output_token_ids}")
+        #breakpoint()
+
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -616,9 +640,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
-
+            full_kv_start_offset = req_data.full_kv_start_block_offsets[i]
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
+
+            # NOTE(brian1009): Sync full-kv-offset
+            req_state.full_kv_start_block_offset = full_kv_start_offset
+
+            # SELF-SPEC: Sync state from scheduler to worker
+            # This ensures the worker's view of self-spec state matches the scheduler's
+            if hasattr(req_data, 'self_spec_state') and len(req_data.self_spec_state) > i:
+                req_state.self_spec_state = req_data.self_spec_state[i]
+                # Deep copy pending tokens to avoid reference issues
+                new_pending_tokens = (
+                    req_data.pending_output_tokens[i].copy()
+                    if req_data.pending_output_tokens[i] else []
+                )
+                req_state.pending_output_tokens = new_pending_tokens
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -632,9 +670,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if num_new_tokens == 1:
                     # Avoid slicing list in most common case.
                     req_state.output_token_ids.append(new_token_ids[-1])
+                    req_state._num_output_tokens += 1
                 elif num_new_tokens > 0:
                     req_state.output_token_ids.extend(
                         new_token_ids[-num_new_tokens:])
+                    req_state._num_output_tokens += num_new_tokens
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -656,10 +696,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # scheduled in the previous step and needs to be added again.
                 reqs_to_add.append(req_state)
                 continue
-
+            
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
+
+            # NOTE(brian1009): Store full-kv-offset
+            self.input_batch.full_kv_start_block_offset_cpu_tensor[req_index] = (
+                full_kv_start_offset
+            )
+
             if new_block_ids is not None:
                 self.input_batch.block_table.append_row(
                     new_block_ids, req_index)
@@ -680,24 +726,63 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+
             if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
-                start_index = self.input_batch.num_tokens_no_spec[req_index]
+
+                # CRITICAL FIX: For self-spec VERIFYING state, spec tokens should be written
+                # at the position where pending tokens were (pending_start_idx), NOT at
+                # num_tokens_no_spec (which may be stale/incorrect).
+                req_state = self.requests.get(req_id)
+                is_self_spec_verifying = (req_state and hasattr(req_state, 'self_spec_state') and \
+                                          req_state.self_spec_state == SelfSpecState.VERIFYING)
+
+                if is_self_spec_verifying:
+                    # During VERIFYING, spec tokens = old pending tokens
+                    # They should go where pending tokens were located
+                    num_prompt_tokens = self.input_batch.num_prompt_tokens[req_index]
+                    num_output_tokens = len(req_state.output_token_ids)
+                    start_index = num_prompt_tokens + num_output_tokens
+
+                    # IMPORTANT: Also fix num_tokens_no_spec to reflect actual verified tokens
+                    # During VERIFYING, pending tokens from ACCUMULATING were incorrectly counted
+                    # in num_tokens_no_spec. We need to correct this.
+                    # num_tokens_no_spec should be: num_computed_tokens (from scheduler)
+                    # which excludes the pending/spec tokens
+                    self.input_batch.num_tokens_no_spec[req_index] = num_computed_tokens
+                else:
+                    # Normal spec decode: write after verified tokens
+                    start_index = self.input_batch.num_tokens_no_spec[req_index]
+
                 end_token_index = start_index + num_spec_tokens
+                # print(f"  Writing spec tokens to positions [{start_index}:{end_token_index}]")
                 self.input_batch.token_ids_cpu[
                     req_index, start_index:end_token_index] = spec_token_ids
-                # NOTE(woosuk): `num_tokens` here may include spec tokens.
-                self.input_batch.num_tokens[req_index] += num_spec_tokens
 
-        # Add the new or resumed requests to the persistent batch.
+                # Update num_tokens
+                if not is_self_spec_verifying:
+                    # NOTE(woosuk): `num_tokens` here may include spec tokens.
+                    self.input_batch.num_tokens[req_index] += num_spec_tokens
+                else:
+                    # For VERIFYING, set num_tokens to include spec tokens
+                    self.input_batch.num_tokens[req_index] = end_token_index
+                # print(f"  After writing: num_tokens[{req_index}]={self.input_batch.num_tokens[req_index]}, num_tokens_no_spec={self.input_batch.num_tokens_no_spec[req_index]}")
+            else:
+                pass
+
+        # Add the new or resumed requests to the persistent batch FIRST.
+        # This ensures they have indices before we update streaming cache buffers.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
             self.input_batch.add_request(request)
 
-        # Condense the batched states if there are gaps left by removed requests
+        # Condense the batched states to fill gaps
         self.input_batch.condense()
-        # Allow attention backend to reorder the batch, potentially
+
+        # Allow attention backend to reorder the batch
+        # This MUST happen before updating buffers to ensure buffers are updated at final indices
         self._may_reorder_batch(scheduler_output)
+
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
@@ -963,6 +1048,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                arange,
                out=positions_np)
 
+        # DEBUG: Print position calculation info
+        # print(f"\n[prepare_inputs] Position calculation:")
+        # print(f"  total_num_scheduled_tokens={total_num_scheduled_tokens}")
+        # print(f"  num_reqs={num_reqs}")
+        # print(f"  req_ids={self.input_batch.req_ids[:num_reqs]}")
+        # print(f"  num_scheduled_tokens={num_scheduled_tokens}")
+        # print(f"  num_computed_tokens_cpu={self.input_batch.num_computed_tokens_cpu[:num_reqs]}")
+        # print(f"  positions_np={positions_np}")
+
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1083,7 +1177,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(total_num_scheduled_tokens, cu_num_tokens)
-
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
@@ -1129,6 +1222,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
 
+        #logger.debug(f"[prepare_inputs] self.input_ids: {self.input_ids.cpu[:total_num_scheduled_tokens]}")
+        #breakpoint()
+        
         logits_indices_padded = None
         if self.cache_config.kv_sharing_fast_prefill:
             logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
@@ -1186,6 +1282,37 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
 
+            use_selective_kv = self.vllm_config.speculative_config.use_self_specs()
+
+            # ===== STREAMING CACHE: Build tensors for CommonAttentionMetadata =====
+            sink_sizes_gpu = None
+            recent_sizes_gpu = None
+            full_kv_start_offset_gpu = None
+
+            if use_selective_kv:
+                self.full_kv_start_offset.cpu[:num_reqs].copy_(
+                    self.input_batch.full_kv_start_block_offset_cpu_tensor[:num_reqs])
+
+                # Copy full_kv_start_offset to GPU
+                self.full_kv_start_offset.copy_to_gpu(num_reqs)
+
+
+                #NOTE(brian1009, 10/28): Directyly operate on GPU 
+                # Broadcast sink_size (constant for all requests) directly on GPU
+                self.sink_sizes.gpu[:num_reqs] = self.vllm_config.scheduler_config.sink_size
+
+                # Compute recent_sizes on GPU from seq_lens to avoid CPU overhead
+                # Note: seq_lens is int32, recent_ratio is float, result needs to be int32
+                # PyTorch requires explicit .int() conversion; torch.mul with out= doesn't support dtype casting
+                self.recent_sizes.gpu[:num_reqs] = (
+                    self.seq_lens.gpu[:num_reqs].float() *
+                    self.vllm_config.scheduler_config.recent_ratio).int()
+
+                # Get GPU tensor views
+                sink_sizes_gpu = self.sink_sizes.gpu[:num_reqs]
+                recent_sizes_gpu = self.recent_sizes.gpu[:num_reqs]
+                full_kv_start_offset_gpu = self.full_kv_start_offset.gpu[:num_reqs]
+
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
@@ -1202,6 +1329,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                # Streaming cache parameters
+                sink_sizes=sink_sizes_gpu,
+                recent_sizes=recent_sizes_gpu,
+                full_kv_start_offset=full_kv_start_offset_gpu,
             )
 
             if (self.speculative_config
@@ -1249,10 +1380,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[ubid][layer_name] = attn_metadata_i
                 else:
                     assert isinstance(attn_metadata, dict)
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args)
+                    # ===== SELF-SPEC: Dispatch to streaming cache or regular build =====
+                    if use_selective_kv and hasattr(builder, 'build_with_streaming'):
+                        # Use streaming cache attention (sink + recent tokens)
+                        attn_metadata_i = builder.build_with_streaming(
+                            common_prefix_len=0,  # Cascade attention incompatible with streaming cache
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args)
+                        #logger.debug("Built attention metadata with streaming cache")
+                    else:
+                        # Regular attention
+                        attn_metadata_i = builder.build(
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args)
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
@@ -2185,22 +2326,62 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not sampled_ids:
                 continue
 
-            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            req_id = req_ids[req_idx]
+            req_state = self.requests[req_id]
+
+            # SELF-SPEC: Calculate correct position for new tokens
+            # For self-spec, we must use num_computed_tokens (synced from scheduler)
+            # instead of num_tokens_no_spec, because:
+            # - num_computed_tokens excludes pending tokens
+            # - When tokens are rejected, scheduler updates num_computed_tokens
+            # - num_tokens_no_spec would give stale position after rejection
+            num_prompt_tokens = self.input_batch.num_prompt_tokens[req_idx]
+            num_output_tokens = len(req_state.output_token_ids)
+
+            # SELF-SPEC: Route tokens based on state
+            # - ACCUMULATING: tokens are pending (not yet verified) → pending_output_tokens
+            # - NORMAL/VERIFYING: tokens are committed → output_token_ids
+            # This prevents unverified tokens from affecting sampling penalties,
+            # logits processors, stop conditions, and user-visible output
+            if (hasattr(req_state, 'self_spec_state') and
+                req_state.self_spec_state == SelfSpecState.ACCUMULATING):
+                # In ACCUMULATING mode: tokens go to pending buffer
+                if not hasattr(req_state, 'pending_output_tokens'):
+                    req_state.pending_output_tokens = []
+                if req_state.pending_output_tokens is None:
+                    req_state.pending_output_tokens = []
+
+                # Position calculation for ACCUMULATING:
+                # [prompt | verified_output | existing_pending | NEW_TOKENS_HERE]
+                num_existing_pending = len(req_state.pending_output_tokens)
+                start_idx = num_prompt_tokens + num_output_tokens + num_existing_pending
+
+                req_state.pending_output_tokens.extend(sampled_ids)
+            else:
+                # NORMAL/VERIFYING mode: tokens go to output_token_ids
+                # Position calculation for NORMAL/VERIFYING:
+                # [prompt | verified_output | NEW_TOKENS_HERE]
+                # Note: During VERIFYING, no new tokens should be sampled
+                start_idx = num_prompt_tokens + num_output_tokens
+
+                req_state.output_token_ids.extend(sampled_ids)
+                req_state._num_output_tokens += len(sampled_ids)
+
             end_idx = start_idx + len(sampled_ids)
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
+            # Write tokens to token_ids_cpu
             self.input_batch.token_ids_cpu[req_idx,
                                            start_idx:end_idx] = sampled_ids
             self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
+
+            # Update tracking counters
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
-            req_id = req_ids[req_idx]
-            req_state = self.requests[req_id]
-            req_state.output_token_ids.extend(sampled_ids)
 
         return (
             num_nans_in_logits,
@@ -2365,6 +2546,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+            
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -2379,6 +2561,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
+                # logger.debug(f"[DEBUG] Local propose_draft_token_ids set _draft_token_ids | is_none={self._draft_token_ids is None} | "
+                #             f"counts={[len(d) for d in self._draft_token_ids] if self._draft_token_ids else None}")
 
         use_padded_batch_for_eagle = self.speculative_config and \
             self.speculative_config.use_eagle() and \
@@ -2396,6 +2580,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec_decode_common_attn_metadata.seq_lens.max() +
             self.speculative_config.num_speculative_tokens
             <= effective_drafter_max_model_len)
+        # logger.debug(f"[DEBUG] input_fits_in_drafter check | "
+        #             f"fits={input_fits_in_drafter} | "
+        #             f"has_metadata={spec_decode_common_attn_metadata is not None} | "
+        #             f"max_seq_len={spec_decode_common_attn_metadata.seq_lens.max() if spec_decode_common_attn_metadata else None} | "
+        #             f"num_spec_tokens={self.speculative_config.num_speculative_tokens if self.speculative_config else None} | "
+        #             f"max_model_len={effective_drafter_max_model_len}")
         if use_padded_batch_for_eagle and input_fits_in_drafter:
             # EAGLE speculative decoding can use the GPU sampled tokens
             # as inputs, and does not need to wait for bookkeeping to finish.
@@ -2418,7 +2608,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 and input_fits_in_drafter):
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
+            # logger.debug(f"[DEBUG] Calling propose_draft_token_ids for ngram/self-spec")
             propose_draft_token_ids(valid_sampled_token_ids)
+        else:
+            pass
+            # logger.debug(f"[DEBUG] NOT calling propose_draft_token_ids | "
+            #             f"has_spec_config={self.speculative_config is not None} | "
+            #             f"not_eagle={not use_padded_batch_for_eagle if self.speculative_config else None} | "
+            #             f"fits={input_fits_in_drafter}")
 
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
@@ -2445,6 +2642,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        #logger.debug(f"[DEBUG] take_draft_token_ids called | _draft_token_ids_is_none={self._draft_token_ids is None}")
         if self._draft_token_ids is None:
             return None
         req_ids = self.input_batch.req_ids
@@ -2452,6 +2650,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             draft_token_ids = self._draft_token_ids.tolist()
         else:
             draft_token_ids = self._draft_token_ids
+        #logger.debug(f"[DEBUG] take_draft_token_ids returning | num_reqs={len(req_ids)} | draft_counts={[len(d) for d in draft_token_ids]}")
         self._draft_token_ids = None
         return DraftTokenIds(req_ids, draft_token_ids)
 
@@ -2475,6 +2674,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs)
+            # logger.debug(f"[NGRAM] propose_draft_token_ids | "
+            #             f"num_requests={len(draft_token_ids)} | "
+            #             f"draft_counts={[len(d) for d in draft_token_ids]} | "
+            #             f"total_drafts={sum(len(d) for d in draft_token_ids)} | "
+            #             f"draft_token_ids={draft_token_ids}")
+        elif self.speculative_config.method == "self_spec_ngram":
+            # Self-spec with n-gram: propose drafts for all requests
+            # Scheduler will override with pending_output_tokens when transitioning to VERIFYING
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, NgramProposer)
+            draft_token_ids = self.drafter.propose(
+                sampled_token_ids, self.input_batch.req_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                self.input_batch.spec_decode_unsupported_reqs)
+            # logger.debug(f"[SELF_SPEC_NGRAM] propose_draft_token_ids | "
+            #             f"num_requests={len(draft_token_ids)} | "
+            #             f"draft_counts={[len(d) for d in draft_token_ids]} | "
+            #             f"total_drafts={sum(len(d) for d in draft_token_ids)}")
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
@@ -2582,6 +2800,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embeds=mm_embeds,
             )
+        elif self.speculative_config.method == "self_specs":
+            # Self-spec doesn't generate draft tokens upfront like other methods.
+            # Token generation happens in ACCUMULATING state and verification
+            # happens in VERIFYING state through the scheduler's FSM.
+            # Return empty draft tokens since drafting is handled by the FSM.
+            draft_token_ids = []
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -2637,7 +2861,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config,
                                                   self.device)
-            if hasattr(self, "drafter"):
+            if hasattr(self, "drafter") and self.drafter is not None:
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
             if self.use_aux_hidden_state_outputs:

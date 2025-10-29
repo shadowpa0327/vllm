@@ -34,6 +34,7 @@ from vllm.utils.flashinfer import (can_use_trtllm_attention,
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
+                                              concat_kv_indices_kernel,
                                               get_kv_cache_layout,
                                               get_per_layer_parameters,
                                               infer_global_hyperparameters,
@@ -248,11 +249,57 @@ class FlashInferMetadata:
     paged_kv_indptr_gpu: Optional[torch.Tensor] = None
 
 
+def _compute_num_selective_blocks(
+    sink_sizes: torch.Tensor,           # [num_reqs]
+    recent_sizes: torch.Tensor,         # [num_reqs]
+    full_kv_start_offset: torch.Tensor, # [num_reqs]
+) -> torch.Tensor:
+    """
+    Compute the number of selective blocks (sink + recent) per request.
+
+    For each request:
+    - If sink_size == 0 and recent_size == 0: return 0 (normal mode)
+    - Else:
+      - Sink blocks: min(sink_size, full_offset)
+      - Recent blocks: max(0, min(recent_size, full_offset - sink_size))
+      - Total selective = sink_blocks + recent_blocks
+
+    Args:
+        sink_sizes: Number of sink blocks [num_reqs]
+        recent_sizes: Number of recent blocks [num_reqs]
+        full_kv_start_offset: Block index where full KV starts [num_reqs]
+
+    Returns:
+        num_selective_blocks: [num_reqs]
+    """
+    # Actual sink blocks (capped by full_offset)
+    actual_sink = torch.minimum(sink_sizes, full_kv_start_offset)
+
+    # Actual recent blocks (from recent_start to full_offset)
+    # recent_start = max(sink_size, full_offset - recent_size)
+    # recent_len = full_offset - recent_start
+    recent_start = torch.maximum(sink_sizes, full_kv_start_offset - recent_sizes)
+    actual_recent = torch.clamp(full_kv_start_offset - recent_start, min=0)
+
+    # Total selective blocks
+    num_selective = actual_sink + actual_recent
+
+    # Selective mode requires: (sink_size > 0 OR recent_size > 0) AND full_offset > 0
+    # If full_offset == 0, we just transitioned and use normal mode
+    is_selective = ((sink_sizes > 0) | (recent_sizes > 0)) & (full_kv_start_offset > 0)
+    num_selective = torch.where(is_selective, num_selective, torch.zeros_like(num_selective))
+
+    return num_selective
+
+
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-    reorder_batch_threshold: int = 1
+
+    #NOTE(brian1009): set to 0 to disable reordering of batch!!
+    # Ask Yilong!!!!!!!!!!!!!!!
+    reorder_batch_threshold: int = 0
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -306,7 +353,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         supports_spec_as_decode = \
             can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode)
+        
+        #NOTE(brian1009): set to 0 to disable reordering of batch!!
+        # Ask Yilong!!!!!!!!!!!!!!!
+        self._init_reorder_batch_threshold(0, supports_spec_as_decode)
+        #self._init_reorder_batch_threshold(1, supports_spec_as_decode)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -365,7 +416,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), get_kv_cache_layout())
+                self._get_workspace_buffer(), get_kv_cache_layout(), backend="fa2")
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self,
@@ -424,6 +475,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             split_decodes_and_prefills(common_attn_metadata,
                                        decode_threshold=self.reorder_batch_threshold,
                                        require_uniform=True)
+
+        assert num_decodes == 0
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
@@ -489,7 +542,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indptr,
             BLOCK_SIZE=1024,
         )
-
         # write self.paged_kv_last_page_len_cpu inplace
         paged_kv_last_page_len_np = seq_lens_np % page_size
         self.paged_kv_last_page_len_np[:num_reqs] = np.where(
@@ -670,6 +722,443 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_data_type=self.kv_cache_dtype,
                     )
         return attn_metadata
+
+    def build_with_streaming(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False
+    ) -> FlashInferMetadata:
+        """
+        Build FlashInferMetadata with streaming cache (selective KV) support.
+
+        This method supports selective KV caching for self-speculative decoding.
+        For requests in ACCUMULATING state, only sink + recent + full_kv blocks
+        are kept to reduce memory bandwidth during drafting.
+
+        The streaming cache parameters (sink_sizes, recent_sizes, full_kv_start_offset)
+        should be populated in common_attn_metadata by gpu_model_runner before calling
+        this method.
+
+        Args:
+            common_prefix_len: Length of common prefix (must be 0, cascade disabled)
+            common_attn_metadata: Common attention metadata with streaming cache params
+            fast_build: Whether to use fast build path
+
+        Returns:
+            FlashInferMetadata with selective KV indices for ACCUMULATING requests
+        """
+
+        # Extract basic metadata (same as original build())
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=self.reorder_batch_threshold,
+                                       require_uniform=True)
+
+        assert num_decodes == 0
+
+        page_size = self.page_size
+        max_q_len = common_attn_metadata.max_query_len
+        max_seq_len = common_attn_metadata.max_seq_len
+        seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        seq_lens_np = seq_lens_cpu.numpy()
+        block_table_tensor = common_attn_metadata.block_table_tensor
+
+        # Compute total blocks per request
+        num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
+        num_blocks_tensor = torch.from_numpy(num_blocks_np).to(
+            dtype=torch.int32, device=self.device)
+
+        # CASCADE ATTENTION IS DISABLED for streaming cache
+        # (selective KV is incompatible with cascade)
+        if common_prefix_len > 0:
+            raise ValueError(
+                "Cascade attention (common_prefix_len > 0) is not supported "
+                "with streaming cache. Set common_prefix_len=0.")
+        use_cascade = False
+
+        # Extract streaming cache metadata from common_attn_metadata
+        # These should be populated by gpu_model_runner based on self_spec_state
+        # before calling this method
+        if common_attn_metadata.sink_sizes is None:
+            raise ValueError(
+                "sink_sizes must be set in common_attn_metadata for streaming cache. "
+                "Please populate it in gpu_model_runner before calling build_with_streaming().")
+        if common_attn_metadata.recent_sizes is None:
+            raise ValueError(
+                "recent_sizes must be set in common_attn_metadata for streaming cache. "
+                "Please populate it in gpu_model_runner before calling build_with_streaming().")
+        if common_attn_metadata.full_kv_start_offset is None:
+            raise ValueError(
+                "full_kv_start_offset must be set in common_attn_metadata for streaming cache. "
+                "Please populate it in gpu_model_runner before calling build_with_streaming().")
+
+        # Extract tensors (already on device from common_attn_metadata)
+        sink_sizes_gpu = common_attn_metadata.sink_sizes[:num_reqs]
+        recent_sizes_gpu = common_attn_metadata.recent_sizes[:num_reqs]
+        full_kv_start_offset_gpu = common_attn_metadata.full_kv_start_offset[:num_reqs]
+
+        # Compute number of selective blocks per request
+        num_selective_blocks = _compute_num_selective_blocks(
+            sink_sizes_gpu,
+            recent_sizes_gpu,
+            full_kv_start_offset_gpu
+        )
+
+        # Compute number of full KV blocks
+        num_full_blocks = torch.clamp(num_blocks_tensor - full_kv_start_offset_gpu, min=0)
+
+        # Compute total output blocks per request
+        # For selective mode: num_selective + num_full
+        # For normal mode: num_blocks
+        # Note: full_offset == 0 means we just transitioned and haven't started
+        # accumulating yet, so use normal mode (all blocks)
+        is_selective = ((sink_sizes_gpu > 0) | (recent_sizes_gpu > 0)) & (full_kv_start_offset_gpu > 0)
+        num_selected_blocks = torch.where(
+            is_selective,
+            num_selective_blocks + num_full_blocks,
+            num_blocks_tensor
+        )
+
+        # Build paged_kv_indptr (cumulative sum)
+        # Transfer to CPU for cumsum (NumPy is faster on CPU)
+        num_selected_blocks_cpu = num_selected_blocks.cpu()
+        num_selected_blocks_np = num_selected_blocks_cpu.numpy()
+
+        # Write to self.paged_kv_indptr_cpu inplace
+        np.cumsum(
+            num_selected_blocks_np,
+            dtype=np.int32,
+            out=self.paged_kv_indptr_np[1:num_reqs + 1],
+        )
+
+        # Copy to buffer (for race condition safety)
+        self.paged_kv_indptr_buffer[:num_reqs + 1] = (
+            self.paged_kv_indptr_cpu[:num_reqs + 1])
+        paged_kv_indptr = self.paged_kv_indptr[:num_reqs + 1]
+        paged_kv_indptr.copy_(self.paged_kv_indptr_buffer[:num_reqs + 1],
+                              non_blocking=True)
+
+        # Build paged_kv_indices using selective kernel
+        num_actual_pages = self.paged_kv_indptr_np[num_reqs]
+        paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
+
+        _copy_selective_page_indices_kernel[(num_reqs,)](
+            paged_kv_indices,
+            block_table_tensor,
+            block_table_tensor.stride(0),
+            sink_sizes_gpu,
+            recent_sizes_gpu,
+            full_kv_start_offset_gpu,
+            num_blocks_tensor,
+            paged_kv_indptr,
+            BLOCK_SIZE=128,
+        )
+
+        # DEBUG: Print detailed streaming cache information
+        # print(f"\n{'='*80}")
+        # print(f"[build_with_streaming] Streaming Cache Debug Info")
+        # print(f"{'='*80}")
+        # print(f"num_reqs: {num_reqs}")
+        # print(f"sink_sizes_gpu: {sink_sizes_gpu}")
+        # print(f"recent_sizes_gpu: {recent_sizes_gpu}")
+        # print(f"full_kv_start_offset_gpu: {full_kv_start_offset_gpu}")
+        # print(f"num_blocks_tensor: {num_blocks_tensor}")
+        # print(f"num_selective_blocks: {num_selective_blocks}")
+        # print(f"num_full_blocks: {num_full_blocks}")
+        # print(f"is_selective: {is_selective}")
+        # print(f"num_selected_blocks: {num_selected_blocks}")
+        # print(f"paged_kv_indptr: {paged_kv_indptr}")
+        # print(f"paged_kv_indices: {paged_kv_indices}")
+        # print(f"block_table_tensor[0]: {block_table_tensor[0]}")
+        # print(f"{'='*80}\n")
+        #breakpoint()
+
+        # Compute paged_kv_last_page_len (same as original)
+        paged_kv_last_page_len_np = seq_lens_np % page_size
+        self.paged_kv_last_page_len_np[:num_reqs] = np.where(
+            paged_kv_last_page_len_np == 0,
+            page_size,
+            paged_kv_last_page_len_np,
+        )
+
+        # TRTLLM detection (same as original)
+        uses_spec_reorder = self.reorder_batch_threshold > 1
+        prefill_use_trtllm = use_trtllm_attention(self.num_qo_heads,
+                                                  self.num_kv_heads,
+                                                  num_prefill_tokens,
+                                                  max_seq_len,
+                                                  self.cache_dtype,
+                                                  self.q_data_type,
+                                                  is_prefill=True,
+                                                  has_sinks=self.has_sinks,
+                                                  has_spec=uses_spec_reorder)
+        decode_use_trtllm = use_trtllm_attention(self.num_qo_heads,
+                                                 self.num_kv_heads,
+                                                 num_decode_tokens,
+                                                 max_seq_len,
+                                                 self.cache_dtype,
+                                                 self.q_data_type,
+                                                 is_prefill=False,
+                                                 has_sinks=self.has_sinks,
+                                                 has_spec=uses_spec_reorder)
+        if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
+            raise NotImplementedError(
+                "FlashInfer backend currently does not support attention "
+                "sinks, please use trtllm on blackwell or flash attention on "
+                "earlier GPUs.")
+
+        # If TRTLLM attention is not used, fall back to model dtype
+        if not (prefill_use_trtllm and decode_use_trtllm):
+            self.q_data_type = self.model_config.dtype
+
+        # Create FlashInferMetadata
+        attn_metadata = FlashInferMetadata(
+            num_actual_tokens=num_actual_tokens,
+            q_data_type=self.q_data_type,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            max_q_len=max_q_len,
+            max_q_len_prefill=max_q_len,
+            max_seq_len=max_seq_len,
+            seq_lens=seq_lens,
+            block_table_tensor=block_table_tensor,
+            prefill_use_trtllm=prefill_use_trtllm,
+            decode_use_trtllm=decode_use_trtllm,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+            use_cascade=use_cascade,
+        )
+
+        # Plan wrappers (same logic as original, minus cascade path)
+        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+        paged_kv_indptr_cpu = self.paged_kv_indptr_cpu[:1 + num_reqs]
+        paged_kv_last_page_len_cpu = self.paged_kv_last_page_len_cpu[:num_reqs]
+
+        # Regular attention (no cascade for streaming cache)
+        num_prefills = attn_metadata.num_prefills
+        num_decodes = attn_metadata.num_decodes
+
+        if num_prefills > 0:
+            # Prefill path
+            prefill_start = num_decodes
+            attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
+            assert qo_indptr_cpu[prefill_start:].shape[0] == num_prefills + 1
+            assert paged_kv_indptr_cpu[prefill_start:].shape[0] == num_prefills + 1
+            assert paged_kv_last_page_len_cpu[prefill_start:].shape[0] == num_prefills
+
+            # Adjust qo_indptr to be relative to prefill start
+            qo_indptr_cpu = qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
+            paged_kv_indptr_cpu = paged_kv_indptr_cpu[prefill_start:]
+
+            # Recompute max_q_len for prefills
+            query_lens_prefill = qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]
+            attn_metadata.max_q_len_prefill = int(query_lens_prefill.max().item())
+
+            if not attn_metadata.prefill_use_trtllm:
+                attn_metadata.prefill_wrapper.plan(
+                    qo_indptr_cpu,
+                    paged_kv_indptr_cpu,
+                    paged_kv_indices,
+                    paged_kv_last_page_len_cpu[prefill_start:],
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.page_size,
+                    causal=True,
+                    sm_scale=self.sm_scale,
+                    window_left=self.window_left,
+                    logits_soft_cap=self.logits_soft_cap,
+                    q_data_type=self.q_data_type,
+                    kv_data_type=self.kv_cache_dtype,
+                )
+            else:
+                attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
+                    self.device, non_blocking=True)
+                attn_metadata.paged_kv_indptr_gpu = paged_kv_indptr_cpu.to(
+                    self.device, non_blocking=True)
+
+        if num_decodes > 0:
+            # Decode path
+            pure_decode = num_prefills == 0
+
+            # NOTE: CUDA graphs may not work correctly with streaming cache
+            # due to dynamic number of blocks. Disable for now.
+            use_cudagraph = False
+            # use_cudagraph = (self.enable_cuda_graph and pure_decode and
+            #                  num_decodes <= self._decode_cudagraph_max_bs)
+
+            if use_cudagraph:
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decode_tokens)
+                self.paged_kv_indptr_cpu[1 + num_decodes:1 + num_input_tokens].fill_(
+                    paged_kv_indptr_cpu[-1])
+                self.paged_kv_last_page_len_cpu[num_decodes:num_input_tokens].fill_(1)
+            else:
+                num_input_tokens = num_decode_tokens
+
+            attn_metadata.decode_wrapper = self._get_decode_wrapper(
+                num_input_tokens, use_cudagraph)
+
+            if not attn_metadata.decode_use_trtllm:
+                fast_plan_decode(
+                    attn_metadata.decode_wrapper,
+                    self.paged_kv_indptr_cpu[:num_input_tokens + 1],
+                    paged_kv_indices,
+                    self.paged_kv_last_page_len_cpu[:num_input_tokens],
+                    seq_lens_cpu[:num_input_tokens],
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.page_size,
+                    pos_encoding_mode="NONE",
+                    sm_scale=self.sm_scale,
+                    window_left=self.window_left,
+                    logits_soft_cap=self.logits_soft_cap,
+                    q_data_type=self.q_data_type,
+                    kv_data_type=self.kv_cache_dtype,
+                )
+
+        return attn_metadata
+
+    # FIXME(brian1009): buggy
+    # def build_with_selective_kv(self,
+    #                            common_prefix_len: int,
+    #                            common_attn_metadata: CommonAttentionMetadata,
+    #                            input_batch,
+    #                            fast_build: bool = False) -> FlashInferMetadata:
+    #     """
+    #     Build FlashInferMetadata with selective KV caching support.
+
+    #     This method implements the selective KV concatenation logic:
+    #     For each request: [selective_kv_indices] + [new_kv_indices]
+
+    #     This is used during the ACCUMULATING phase of self-speculative decoding,
+    #     where we only attend to sink tokens + recent tokens to reduce computation.
+    #     """
+    #     # Extract dimensions from common_attn_metadata
+    #     num_reqs = common_attn_metadata.num_reqs
+    #     num_actual_tokens = common_attn_metadata.num_actual_tokens
+
+    #     page_size = self.page_size
+    #     device = common_attn_metadata.query_start_loc.device
+    #     qo_indptr = common_attn_metadata.query_start_loc
+    #     seq_lens = common_attn_metadata.seq_lens
+    #     block_table_tensor = common_attn_metadata.block_table_tensor[:num_reqs]
+    #     slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
+
+    #     block_table_bounds = (seq_lens + page_size - 1) // page_size
+
+    #     # IMPORTANT: Cascade attention is incompatible with selective KV
+    #     # Cascade requires shared prefix, but selective KV has per-request selections
+    #     use_cascade = False
+    #     shared_qo_indptr_cpu = None
+    #     shared_kv_page_indptr_cpu = None
+    #     shared_kv_page_indices_cpu = None
+    #     shared_kv_last_page_len_cpu = None
+
+    #     # Get all KV indices using block table mask
+    #     mask = (torch.arange(block_table_tensor.size(1),
+    #                         dtype=block_table_tensor.dtype,
+    #                         device=block_table_tensor.device).unsqueeze(0)
+    #             < block_table_bounds.unsqueeze(1))
+    #     all_kv_indices = block_table_tensor[mask]
+
+    #     # Extract selective KV information from InputBatch
+    #     # These were populated by the scheduler in SchedulerOutput
+    #     len_selected_kv_indices = input_batch.num_selective_kv_indices_cpu_tensor[:num_reqs]
+    #     len_selected_kv_indices_tensor = len_selected_kv_indices.to(
+    #         device=device, dtype=torch.int32, non_blocking=True)
+
+    #     selected_kv_indices = input_batch.selective_kv_indices_cpu_tensor[:num_reqs]
+    #     selected_kv_indices_tensor = selected_kv_indices.to(
+    #         device=device, dtype=torch.int32, non_blocking=True)
+
+    #     full_kv_start_offset = input_batch.full_kv_start_offset_cpu_tensor[:num_reqs]
+    #     full_kv_start_offset_tensor = full_kv_start_offset.to(
+    #         device=device, dtype=torch.int32, non_blocking=True)
+
+    #     # Calculate cumulative sum of full KV sequence lengths
+    #     full_kv_seq_len_cumsum = torch.cat([
+    #         torch.zeros(1,
+    #                     dtype=block_table_bounds.dtype,
+    #                     device=block_table_bounds.device),
+    #         block_table_bounds.cumsum(dim=0, dtype=torch.int32)
+    #     ])
+
+    #     # Calculate new indices per request (after the selective indices)
+    #     len_all_kv_indices = block_table_bounds - full_kv_start_offset_tensor
+
+    #     # Adjust offsets to be absolute in the flattened all_kv_indices
+    #     full_kv_start_offset_tensor = full_kv_start_offset_tensor + full_kv_seq_len_cumsum[:-1]
+
+    #     # Calculate paged_kv_indptr (cumulative sum of concatenated lengths)
+    #     paged_kv_indptr = torch.cat([
+    #         torch.zeros(1,
+    #                     dtype=block_table_bounds.dtype,
+    #                     device=block_table_bounds.device),
+    #         (len_all_kv_indices + len_selected_kv_indices_tensor).cumsum(dim=0, dtype=torch.int32)
+    #     ])
+
+    #     # Allocate output buffer for concatenated indices
+    #     total_output_size = paged_kv_indptr[-1].item()
+    #     paged_kv_indices = torch.zeros(total_output_size, dtype=torch.int32, device=device)
+
+    #     # Launch Triton kernel to concatenate selective + new indices
+    #     if concat_kv_indices_kernel is not None:
+    #         grid = (32,)  # Number of programs to launch
+    #         concat_kv_indices_kernel[grid](
+    #             selected_kv_indices_tensor,
+    #             selected_kv_indices_tensor.stride(0),
+    #             len_selected_kv_indices_tensor,
+    #             all_kv_indices,
+    #             full_kv_start_offset_tensor,
+    #             len_all_kv_indices,
+    #             paged_kv_indices,
+    #             paged_kv_indptr,
+    #             num_reqs,
+    #             BLOCK_SIZE=128,
+    #         )
+    #     else:
+    #         raise RuntimeError("concat_kv_indices_kernel not available, cannot use selective KV")
+
+    #     # Calculate last page lengths
+    #     paged_kv_last_page_len = seq_lens % page_size
+    #     paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+    #                                          page_size, paged_kv_last_page_len)
+
+    #     # Create FlashInferMetadata with selective KV indices
+    #     attn_metadata = FlashInferMetadata(
+    #         num_actual_tokens=num_actual_tokens,
+    #         qo_indptr=qo_indptr,
+    #         paged_kv_indptr=paged_kv_indptr,
+    #         paged_kv_indices=paged_kv_indices,  # Concatenated selective + new indices
+    #         paged_kv_last_page_len=paged_kv_last_page_len,
+    #         num_qo_heads=self.num_qo_heads,
+    #         num_kv_heads=self.num_kv_heads,
+    #         head_dim=self.head_dim,
+    #         page_size=page_size,
+    #         data_type=self.kv_cache_dtype,
+    #         q_data_type=self.q_data_type,
+    #         slot_mapping=slot_mapping,
+    #         num_decodes=0,  # Selective KV is only for decode-like operations
+    #         num_decode_tokens=num_actual_tokens,
+    #         num_prefills=0,
+    #         num_prefill_tokens=0,
+    #         use_cascade=use_cascade,
+    #         shared_qo_indptr_cpu=shared_qo_indptr_cpu,
+    #         shared_kv_page_indptr_cpu=shared_kv_page_indptr_cpu,
+    #         shared_kv_page_indices_cpu=shared_kv_page_indices_cpu,
+    #         shared_kv_last_page_len_cpu=shared_kv_last_page_len_cpu,
+    #     )
+
+    #     # Plan FlashInfer wrappers
+    #     self._plan(attn_metadata)
+
+    #     return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
@@ -1179,3 +1668,91 @@ def _copy_page_indices_kernel(
         tl.store(page_indices + start_idx + i + offset,
                  block_ids,
                  mask=i + offset < num_blocks)
+
+
+@triton.jit
+def _copy_selective_page_indices_kernel(
+    page_indices,              # Output: [num_output_blocks] flattened selective block IDs
+    block_table,               # Input: [num_reqs, max_blocks] full block table
+    block_table_stride,        # Stride for block_table
+    sink_sizes,                # Input: [num_reqs] number of sink blocks per request
+    recent_sizes,              # Input: [num_reqs] number of recent blocks per request
+    full_kv_start_offset,      # Input: [num_reqs] block index where full KV starts
+    num_total_blocks,          # Input: [num_reqs] total blocks per request
+    cu_num_output_blocks,      # Input: [num_reqs+1] cumsum of output blocks (paged_kv_indptr)
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Derive and copy selective KV blocks directly from block_table.
+
+    For each request in SELECTIVE mode (sink_size > 0 OR recent_size > 0):
+    1. Copy sink blocks: block_table[0:sink_size]
+    2. Copy recent blocks: block_table[max(sink_size, full_offset - recent_size):full_offset]
+    3. Copy full KV blocks: block_table[full_offset:num_total]
+
+    For normal mode (sink_size == 0 AND recent_size == 0):
+    - Copy all blocks: block_table[0:num_total]
+    """
+    req_idx = tl.program_id(0)
+
+    # Load metadata for this request
+    sink_size = tl.load(sink_sizes + req_idx)
+    recent_size = tl.load(recent_sizes + req_idx)
+    full_offset = tl.load(full_kv_start_offset + req_idx)
+    num_total = tl.load(num_total_blocks + req_idx)
+    output_start = tl.load(cu_num_output_blocks + req_idx)
+
+    # Pointer to this request's block table
+    block_table_ptr = block_table + req_idx * block_table_stride
+    output_ptr = page_indices + output_start
+
+    # Check if selective mode
+    # Note: full_offset == 0 means we just transitioned to ACCUMULATING
+    # and haven't started accumulating yet, so use normal mode (all blocks)
+    is_selective = ((sink_size > 0) or (recent_size > 0)) and (full_offset > 0)
+
+    if is_selective:
+        # ===== SELECTIVE KV MODE =====
+        write_pos = 0
+
+        # 1. Copy sink blocks: [0, sink_size)
+        if sink_size > 0:
+            for i in range(0, sink_size, BLOCK_SIZE):
+                offs = i + tl.arange(0, BLOCK_SIZE)
+                mask = offs < sink_size
+                block_ids = tl.load(block_table_ptr + offs, mask=mask, other=0)
+                tl.store(output_ptr + write_pos + offs, block_ids, mask=mask)
+            write_pos = write_pos + sink_size
+
+        # 2. Copy recent blocks: [recent_start, full_offset)
+        # recent_start = max(sink_size, full_offset - recent_size)
+        if recent_size > 0:
+            recent_start = tl.maximum(sink_size, full_offset - recent_size)
+            recent_len = full_offset - recent_start
+
+            if recent_len > 0:
+                for i in range(0, recent_len, BLOCK_SIZE):
+                    offs = i + tl.arange(0, BLOCK_SIZE)
+                    mask = offs < recent_len
+                    block_ids = tl.load(block_table_ptr + recent_start + offs,
+                                       mask=mask, other=0)
+                    tl.store(output_ptr + write_pos + offs, block_ids, mask=mask)
+                write_pos = write_pos + recent_len
+
+        # 3. Copy full KV blocks: [full_offset, num_total)
+        num_full = num_total - full_offset
+        if num_full > 0:
+            for i in range(0, num_full, BLOCK_SIZE):
+                offs = i + tl.arange(0, BLOCK_SIZE)
+                mask = offs < num_full
+                block_ids = tl.load(block_table_ptr + full_offset + offs,
+                                   mask=mask, other=0)
+                tl.store(output_ptr + write_pos + offs, block_ids, mask=mask)
+    else:
+        # ===== NORMAL MODE =====
+        # Copy all blocks from block_table
+        for i in range(0, num_total, BLOCK_SIZE):
+            offs = i + tl.arange(0, BLOCK_SIZE)
+            mask = offs < num_total
+            block_ids = tl.load(block_table_ptr + offs, mask=mask, other=0)
+            tl.store(output_ptr + offs, block_ids, mask=mask)

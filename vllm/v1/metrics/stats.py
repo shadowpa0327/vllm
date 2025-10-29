@@ -47,6 +47,10 @@ class SchedulerStats:
 
     num_corrupted_reqs: int = 0
 
+    # ===== SELF-SPEC METRICS =====
+    self_spec_spec_decoding_stats: Optional[SpecDecodingStats] = None
+    # ===== END SELF-SPEC METRICS =====
+
 
 @dataclass
 class LoRAStats:

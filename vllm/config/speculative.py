@@ -32,7 +32,8 @@ logger = init_logger(__name__)
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
-                            "longcat_flash_mtp", "mtp"]
+                            "longcat_flash_mtp", "mtp", "self_specs",
+                            "self_spec_ngram"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -100,6 +101,12 @@ class SpeculativeConfig:
     prompt_lookup_min: Optional[int] = None
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+    num_ngram_draft_tokens: Optional[int] = None
+    """Number of draft tokens to generate per step for self_spec_ngram.
+    For 'ngram' method, this is controlled by num_speculative_tokens.
+    For 'self_spec_ngram', this controls how many n-gram drafts are proposed
+    during ACCUMULATING phase, while num_speculative_tokens controls the
+    threshold for transitioning to VERIFYING. If not provided, defaults to 3."""
 
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
@@ -233,6 +240,14 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "self_specs":
+                # Self-speculative decoding doesn't use a separate model
+                # Keep model as None
+                pass
+            elif self.method == "self_spec_ngram":
+                # Self-spec with n-gram assistance
+                # Keep model as None (uses ngram proposer)
+                self.model = "ngram"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without "
@@ -244,9 +259,10 @@ class SpeculativeConfig:
                                     and self.model in ("ngram", "[ngram]")):
             self.method = "ngram"
 
-        if self.method in ("ngram", "[ngram]"):
-            # Unified to "ngram" internally
-            self.method = "ngram"
+        if self.method in ("ngram", "[ngram]", "self_spec_ngram"):
+            # Unified to "ngram" or "self_spec_ngram" internally
+            if self.method in ("ngram", "[ngram]"):
+                self.method = "ngram"
             # Set default values if not provided
             if (self.prompt_lookup_min is None
                     and self.prompt_lookup_max is None):
@@ -271,6 +287,22 @@ class SpeculativeConfig:
                 raise ValueError(
                     f"prompt_lookup_min={self.prompt_lookup_min} must "
                     f"be <= prompt_lookup_max={self.prompt_lookup_max}")
+
+            # Set num_ngram_draft_tokens for self_spec_ngram
+            if self.method == "self_spec_ngram":
+                if self.num_ngram_draft_tokens is None:
+                    raise ValueError(
+                        f"num_ngram_draft_tokens must be set for self_spec_ngram")
+
+                # Validate num_ngram_draft_tokens
+                if self.num_ngram_draft_tokens < 1:
+                    raise ValueError(
+                        f"num_ngram_draft_tokens={self.num_ngram_draft_tokens} must be > 0")
+                if self.num_ngram_draft_tokens > self.num_speculative_tokens:
+                    logger.warning(
+                        f"num_ngram_draft_tokens={self.num_ngram_draft_tokens} is greater than "
+                        f"num_speculative_tokens={self.num_speculative_tokens}. "
+                        f"This may waste computation as drafts will be capped at threshold.")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
@@ -561,8 +593,16 @@ class SpeculativeConfig:
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
 
+    def use_self_specs(self) -> bool:
+        return self.method in ("self_specs", "self_spec_ngram")
+
     def __repr__(self) -> str:
         method = self.method
-        model = None if method == "ngram" else self.draft_model_config.model
+        if method in ("ngram", "self_specs", "self_spec_ngram"):
+            model = None
+        elif self.draft_model_config is not None:
+            model = self.draft_model_config.model
+        else:
+            model = None
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

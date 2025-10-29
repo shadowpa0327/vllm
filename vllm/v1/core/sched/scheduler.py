@@ -33,7 +33,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, SelfSpecState
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -158,11 +158,44 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
+        # ===== SELF-SPEC ADDITIONS START =====
+        self.use_self_specs = False
+        self.self_spec_threshold = 0
+        self.self_spec_ngram_num_draft_tokens = 0  # For self_spec_ngram
+        # Streaming cache parameters (block-based)
+        self.streaming_cache_sink_size_blocks = 0
+        self.streaming_cache_recent_ratio = 0.0
+        # ===== SELF-SPEC ADDITIONS END =====
+
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+            # ===== SELF-SPEC ADDITIONS START =====
+            elif hasattr(speculative_config, 'use_self_specs') and speculative_config.use_self_specs():
+                self.use_self_specs = True
+                self.self_spec_threshold = self.num_spec_tokens
+                # For self_spec_ngram: get num_ngram_draft_tokens (defaults to 3 if not set)
+                self.self_spec_ngram_num_draft_tokens = getattr(speculative_config, 'num_ngram_draft_tokens', 0) or 0
+                # Load streaming cache config from scheduler_config
+                self.streaming_cache_sink_size_blocks = self.scheduler_config.sink_size
+                self.streaming_cache_recent_ratio = self.scheduler_config.recent_ratio
+                logger.info(
+                    f"Self-spec enabled: threshold={self.self_spec_threshold}, "
+                    f"num_ngram_draft_tokens={self.self_spec_ngram_num_draft_tokens}, "
+                    f"streaming_cache: sink_size_blocks={self.streaming_cache_sink_size_blocks}, "
+                    f"recent_ratio={self.streaming_cache_recent_ratio}"
+                )
+            # ===== SELF-SPEC ADDITIONS END =====
+
+        # ===== SELF-SPEC SPARSE KV TRACKING =====
+        # Selective KV Indices for sparse attention per request
+        # Maps request_id -> list of selected KV indices (sink + recent tokens)
+        self.req_to_sparse_selected_kv_indices: dict[str, list[int]] = {}
+        # Maps request_id -> offset where full KV computation starts
+        self.req_to_full_kv_start_offset: dict[str, int] = {}
+        # ===== END SELF-SPEC ADDITIONS =====
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -175,6 +208,50 @@ class Scheduler(SchedulerInterface):
             dcp_world_size=self.dcp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+
+    def should_start_self_spec_verification(self, request: Request) -> bool:
+        """Check if a request should start verification based on scheduler's threshold.
+
+        Verification is triggered when either:
+        1. We've accumulated enough tokens (>= self_spec_threshold), OR
+        2. Continuing accumulation would exceed max_model_len (safety check)
+
+        The max_model_len check prevents buffer overflow in gpu_model_runner.py
+        where token_ids_cpu buffer is sized to max_model_len.
+
+        Args:
+            request: Request to check
+
+        Returns:
+            True if verification should start, False otherwise
+        """
+        if not self.use_self_specs:
+            return False
+
+        if request.self_spec_state != SelfSpecState.ACCUMULATING:
+            return False
+
+        # Normal case: reached the verification threshold
+        if len(request._pending_output_tokens) >= self.self_spec_threshold:
+            # logger.debug(
+            #     f"Request {request.request_id}: triggering verification "
+            #     f"(pending={len(request._pending_output_tokens)} >= threshold={self.self_spec_threshold})"
+            # )
+            return True
+
+        # CRITICAL SAFETY CHECK: Force early verification if continuing would overflow
+        # During verification, we need space for:
+        #   num_computed_tokens + 1 (re-verify last token) + len(pending_tokens)
+        # We must keep this < max_model_len to avoid buffer overflow
+        space_needed = request.num_computed_tokens + len(request._pending_output_tokens)
+        if space_needed >= self.max_model_len:
+            # logger.warning(
+            #     f"Request {request.request_id}: forcing early verification "
+            #     f"(space_needed={space_needed} >= max_model_len={self.max_model_len})"
+            # )
+            return True
+
+        return False
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -201,6 +278,9 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Self-spec sparse attention related.
+        sparse_selected_kv_indices_of_scheduled_reqs: dict[str, list[int]] = {}
+        full_kv_start_offset_of_scheduled_reqs: dict[str, int] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -209,6 +289,56 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+
+            # Check if request should start verification (reuse spec decoding interface)
+            if self.use_self_specs and self.should_start_self_spec_verification(request):
+                #logger.debug(f"Request {request.request_id}: starting self-spec verification")
+
+
+                # Adjust num_computed_tokens to exclude pending tokens
+                # The scheduler has been incrementing num_computed_tokens for pending tokens,
+                # but when we move them to spec_token_ids for verification, they should be
+                # considered "uncomputed" so the scheduler will schedule them for verification
+                num_scheduled_pending_output_tokens = request.num_tokens - request.num_computed_tokens
+                request.num_computed_tokens += (num_scheduled_pending_output_tokens - len(request._pending_output_tokens))
+
+                # Fall back one token: treat the last computed/verified token as newly generated
+                # This ensures the model re-verifies from the last confirmed token
+                request.num_computed_tokens -= 1
+
+                # Transition to verification state and get tokens to verify
+                tokens_to_verify = request.start_self_spec_verification()
+
+                # CRITICAL FIX: Trim verification batch to exactly the threshold
+                # This prevents metrics assertion failures and ensures consistent batch sizes
+                # With n-gram assistance, pending tokens can exceed threshold due to multi-token acceptance
+                if len(tokens_to_verify) > self.self_spec_threshold:
+                    # logger.debug(
+                    #     f"[SELF_SPEC_NGRAM] Request {request.request_id}: Trimmed verification batch | "
+                    #     f"total_pending={len(tokens_to_verify)} → verify_now={self.self_spec_threshold}"
+                    # )
+                    tokens_to_verify = tokens_to_verify[:self.self_spec_threshold]
+
+                # During verification, use full KV indices (no sparse attention)
+                #self.req_to_sparse_selected_kv_indices[request.request_id] = []
+                self.req_to_full_kv_start_offset[request.request_id] = 0
+                # CRITICAL: Also reset the request object field so scheduler reads 0
+                old_offset = request.full_kv_start_block_offset
+                request.full_kv_start_block_offset = 0
+                # logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: TRANSITION ACCUMULATING→VERIFYING | "
+                #             f"pending_tokens={len(request._pending_output_tokens)} | "
+                #             f"spec_token_ids={len(tokens_to_verify)} | "
+                #             f"num_computed_tokens={request.num_computed_tokens} | "
+                #             f"full_kv_offset: {old_offset}→0")
+
+                # Reuse the existing spec decoding interface
+                request.spec_token_ids = tokens_to_verify
+                num_draft_tokens = len(tokens_to_verify)
+
+                # logger.debug(
+                #     f"Request {request.request_id}: verification scheduled with "
+                #     f"{num_draft_tokens} draft tokens"
+                # )
 
             num_new_tokens = (request.num_tokens_with_spec +
                               request.num_output_placeholders -
@@ -252,10 +382,19 @@ class Scheduler(SchedulerInterface):
                 continue
 
             while True:
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens,
-                    num_lookahead_tokens=self.num_lookahead_tokens)
+                # SELF-SPEC: delay_cache_blocks=True during ACCUMULATING to avoid caching speculative tokens
+                if request.self_spec_state == SelfSpecState.ACCUMULATING:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_lookahead_tokens=self.num_lookahead_tokens,
+                        delay_cache_blocks=True  # Don't cache pending tokens yet
+                    )
+                else:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -274,6 +413,14 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
+                    # SELF-SPEC: Reset self-spec state when preempting
+                    if self.use_self_specs:
+                        preempted_req.self_spec_state = SelfSpecState.NORMAL
+                        preempted_req._pending_output_tokens = []
+                        preempted_req.spec_token_ids = []
+                        # Clean up sparse KV tracking
+                        self.req_to_sparse_selected_kv_indices.pop(preempted_req.request_id, None)
+                        self.req_to_full_kv_start_offset.pop(preempted_req.request_id, None)
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
@@ -300,6 +447,11 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
+            # Debug: Check spec_token_ids
+            # logger.debug(f"[DEBUG] schedule() checking spec_token_ids | req_id={request.request_id} | "
+            #             f"has_spec_tokens={bool(request.spec_token_ids)} | "
+            #             f"spec_token_count={len(request.spec_token_ids) if request.spec_token_ids else 0}")
+
             if request.spec_token_ids:
                 num_scheduled_spec_tokens = (num_new_tokens +
                                              request.num_computed_tokens -
@@ -309,6 +461,8 @@ class Scheduler(SchedulerInterface):
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
                         request.spec_token_ids)
+                    # logger.debug(f"[DEBUG] schedule() added to scheduled_spec_decode_tokens | req_id={request.request_id} | "
+                    #             f"num_tokens={len(request.spec_token_ids)}")
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -318,6 +472,17 @@ class Scheduler(SchedulerInterface):
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
+
+            # Sparse Attention related (SELF-SPEC)
+            if request.self_spec_state == SelfSpecState.ACCUMULATING:
+                sparse_selected_kv_indices_of_scheduled_reqs[request.request_id] = (
+                    self.req_to_sparse_selected_kv_indices.get(request.request_id, []))
+                full_kv_start_offset_of_scheduled_reqs[request.request_id] = (
+                    self.req_to_full_kv_start_offset.get(request.request_id, 0))
+                # logger.debug(
+                #     f"Request {request.request_id}: scheduled with sparse KV "
+                #     f"(selected_indices={len(sparse_selected_kv_indices_of_scheduled_reqs[request.request_id])})"
+                # )
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -333,7 +498,9 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
-            while self.waiting and token_budget > 0:
+            #while self.waiting and token_budget > 0:
+            while self.waiting and token_budget > 0 and self.kv_cache_manager.usage < 0.9:
+            # (self.kv_cache_manager.block_pool.num_gpu_blocks) * 0.1
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
@@ -585,6 +752,8 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            sparse_selected_kv_indices_of_scheduled_reqs=sparse_selected_kv_indices_of_scheduled_reqs,
+            full_kv_start_offset=full_kv_start_offset_of_scheduled_reqs,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
             # finished_req_ids is an existing state in the scheduler,
@@ -669,6 +838,12 @@ class Scheduler(SchedulerInterface):
         new_token_ids: list[list[int]] = []
         new_block_ids: list[Optional[tuple[list[int], ...]]] = []
         num_computed_tokens: list[int] = []
+        self_spec_states: list[SelfSpecState] = []
+        pending_output_tokens_list: list[list[int]] = []
+        # Streaming cache parameters
+        sink_sizes_list: list[int] = []
+        recent_sizes_list: list[int] = []
+        full_kv_start_block_offsets_list: list[int] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -682,8 +857,18 @@ class Scheduler(SchedulerInterface):
                 # stage worker and the last-stage worker. Otherwise, we don't
                 # need to send the sampled tokens back because the model runner
                 # will cache them.
-                token_ids = req.all_token_ids[req.num_computed_tokens:req.
-                                              num_computed_tokens + num_tokens]
+                # Handle temporary tokens during self-spec mode
+                if req.is_in_self_spec_mode and num_tokens > 0:
+                    # During self-spec mode, new tokens might be in pending buffer
+                    # We need to get them from the combined view
+                    # Access the underlying list since all_token_ids is a ConstantList
+                    all_tokens_with_pending = req._all_token_ids + req.get_pending_tokens()
+                    token_ids = all_tokens_with_pending[
+                        req.num_computed_tokens:req.num_computed_tokens + num_tokens]
+                else:
+                    # Normal case: extract from all_token_ids (can use the ConstantList here)
+                    token_ids = req.all_token_ids[req.num_computed_tokens:req.
+                                                  num_computed_tokens + num_tokens]
                 new_token_ids.append(token_ids)
             elif use_connector:
                 # When using a KVConnector, we add a placeholder to avoid index
@@ -693,6 +878,28 @@ class Scheduler(SchedulerInterface):
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True))
             num_computed_tokens.append(req.num_computed_tokens)
+            # SELF-SPEC: Populate self-spec state
+            self_spec_states.append(req.self_spec_state)
+            pending_output_tokens_list.append(req.get_pending_tokens())
+
+            # Streaming cache: Populate based on self_spec_state
+            if req.self_spec_state == SelfSpecState.ACCUMULATING:
+                # Use streaming cache for ACCUMULATING state
+                # Compute recent_size dynamically based on num_computed_tokens and recent_ratio
+                #num_recent_blocks = int(req.num_computed_tokens * self.streaming_cache_recent_ratio / self.block_size)
+                #NOTE(brian1009, 10/28): Compute in GPU Model Runner
+                #sink_sizes_list.append(self.streaming_cache_sink_size_blocks)
+                #recent_sizes_list.append(num_recent_blocks)
+                # CRITICAL: Use dictionary which is updated correctly, not request field which may be stale
+                full_kv_start_block_offsets_list.append(self.req_to_full_kv_start_offset.get(req_id, 0))
+            else:
+                # NORMAL or VERIFYING: use full KV (no streaming cache)
+                #NOTE(brian1009, 10/28): Compute in GPU Model Runner
+                #sink_sizes_list.append(0)
+                #recent_sizes_list.append(0)
+                full_kv_start_block_offsets_list.append(0)
+
+
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -704,6 +911,11 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
+            self_spec_state=self_spec_states,
+            pending_output_tokens=pending_output_tokens_list,
+            sink_sizes=sink_sizes_list,
+            recent_sizes=recent_sizes_list,
+            full_kv_start_block_offsets=full_kv_start_block_offsets_list,
         )
 
     def _try_schedule_encoder_inputs(
@@ -873,6 +1085,7 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
+        self_spec_spec_decoding_stats: Optional[SpecDecodingStats] = None
         kv_connector_stats = (kv_connector_output.kv_connector_stats
                               if kv_connector_output else None)
 
@@ -906,10 +1119,30 @@ class Scheduler(SchedulerInterface):
                 # num_computed_tokens is decreased by the number of rejected
                 # tokens.
                 request.num_computed_tokens -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted)
+
+                # case 1: self-spec stats
+                if self.use_self_specs and request.self_spec_state == SelfSpecState.VERIFYING:
+                    #print(f"[DEBUG] make_spec_decoding_stats for self-spec stats | num_draft_tokens={num_draft_tokens} | num_accepted_tokens={num_accepted}")
+                    self_spec_spec_decoding_stats = self.make_spec_decoding_stats(
+                        self_spec_spec_decoding_stats,
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted,
+                        num_spec_tokens=self.self_spec_threshold if self.self_spec_threshold > 0 else None)
+                
+                # case 2: normal spec stats
+                if not self.use_self_specs or (self.use_self_specs and request.self_spec_state != SelfSpecState.VERIFYING):
+                    spec_decoding_stats = self.make_spec_decoding_stats(
+                        spec_decoding_stats,
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted,
+                        num_spec_tokens=self.self_spec_ngram_num_draft_tokens if self.self_spec_ngram_num_draft_tokens > 0 else None
+                    )
+                
+            # SELF-SPEC: Finishing verification, reset state to normal
+            if self.use_self_specs and request.self_spec_state == SelfSpecState.VERIFYING:
+                # Flush the processed spec_token_ids
+                request.spec_token_ids = []
+                request.self_spec_state = SelfSpecState.NORMAL
 
             stopped = False
             new_logprobs = None
@@ -918,10 +1151,10 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
 
             # Check for stop and update request status.
+            should_flip_to_accumulating = False
             if new_token_ids:
-                new_token_ids, stopped = self._update_request_with_output(
+                new_token_ids, stopped, should_flip_to_accumulating = self._update_request_with_output(
                     request, new_token_ids)
-
             # Stop checking for pooler models.
             pooler_output = None
             if pooler_outputs:
@@ -956,14 +1189,19 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None \
+
+            # SELF-SPEC: Filter tokens for output based on state
+            # During ACCUMULATING, don't send unverified tokens to user
+            output_token_ids = [] if request.self_spec_state == SelfSpecState.ACCUMULATING else new_token_ids
+
+            if output_token_ids or pooler_output is not None \
                 or kv_transfer_params:
 
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
-                        new_token_ids=new_token_ids,
+                        new_token_ids=output_token_ids,  # Use filtered version
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
@@ -974,7 +1212,28 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                     ))
-            else:
+
+            # SELF-SPEC: Transition to ACCUMULATING after output is created
+            # This ensures the current output reflects the NORMAL state tokens
+            if should_flip_to_accumulating and not stopped:
+                request.self_spec_state = SelfSpecState.ACCUMULATING
+                # Update sparse KV indices when transitioning to ACCUMULATING
+                # all_kv_indices = self.kv_cache_manager.get_block_ids(request.request_id)[0][:request.num_computed_tokens]
+                # if self.sink_size + self.recent_size >= len(all_kv_indices):
+                #     selective_kv_indices = all_kv_indices
+                # else:
+                #     selective_kv_indices = (
+                #         all_kv_indices[:self.sink_size] +
+                #         all_kv_indices[-self.recent_size:]
+                #     )
+                # self.req_to_sparse_selected_kv_indices[request.request_id] = selective_kv_indices
+                self.req_to_full_kv_start_offset[request.request_id] = request.num_computed_tokens
+                # Update streaming cache: set block offset where full KV starts
+                num_blocks = (request.num_computed_tokens + self.block_size - 1) // self.block_size
+                request.full_kv_start_block_offset = num_blocks
+                #logger.debug(f"Request {request.request_id}: transitioned to ACCUMULATING state")
+
+            if not (new_token_ids or pooler_output is not None or kv_transfer_params):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
@@ -1010,8 +1269,20 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set)
             finished_req_ids.clear()
 
+        # Calculate self-spec state counts
+        num_cached_reqs_in_accumulating = 0
+        num_cached_reqs_in_verifying = 0
+        if self.use_self_specs:
+            for req in self.running:
+                if req.self_spec_state == SelfSpecState.ACCUMULATING:
+                    num_cached_reqs_in_accumulating += 1
+                elif req.self_spec_state == SelfSpecState.VERIFYING:
+                    num_cached_reqs_in_verifying += 1
+
         if (stats := self.make_stats(spec_decoding_stats,
-                                     kv_connector_stats)) is not None:
+                                     kv_connector_stats,
+                                    # ===== SELF-SPEC =====
+                                     self_spec_spec_decoding_stats)) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
@@ -1025,21 +1296,42 @@ class Scheduler(SchedulerInterface):
         self,
         request: Request,
         new_token_ids: list[int],
-    ) -> tuple[list[int], bool]:
+    ) -> tuple[list[int], bool, bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.
         stopped = False
-        for num_new, output_token_id in enumerate(new_token_ids, 1):
-            request.append_output_token_ids(output_token_id)
+        flip_from_normal_to_accumulating = False
 
-            # Check for stop and update request state.
-            # This must be called before we make the EngineCoreOutput.
-            stopped = check_stop(request, self.max_model_len)
+        for num_new, output_token_id in enumerate(new_token_ids, 1):
+            # SELF-SPEC: Route tokens based on state
+            if request.self_spec_state == SelfSpecState.ACCUMULATING:
+                # In accumulating mode, tokens go to pending buffer (not committed yet)
+                request.add_pending_token(output_token_id)
+                # logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: ACCUMULATING | "
+                #              f"added token to pending | "
+                #              f"pending_count={len(request._pending_output_tokens)}/{self.self_spec_threshold}")
+                # Don't check stop conditions on pending tokens
+            elif request.self_spec_state == SelfSpecState.NORMAL:
+                # Normal mode: commit tokens immediately
+                request.append_output_token_ids(output_token_id)
+                stopped = check_stop(request, self.max_model_len)
+                # After committing, flip to accumulating if self-spec enabled
+                if self.use_self_specs:
+                    flip_from_normal_to_accumulating = True
+            else:
+                # Should never happen - VERIFYING state doesn't generate new tokens
+                raise ValueError(
+                    f"Unexpected self-spec state during token generation: {request.self_spec_state}"
+                )
+
             if stopped:
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
-        return new_token_ids, stopped
+
+        # SELF-SPEC: Return flag to caller for delayed state transition
+        # This allows the state transition to happen after EngineCoreOutput is created
+        return new_token_ids, stopped, flip_from_normal_to_accumulating
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = (
@@ -1070,11 +1362,13 @@ class Scheduler(SchedulerInterface):
         self,
         draft_token_ids: DraftTokenIds,
     ) -> None:
+        #logger.debug(f"[DEBUG] update_draft_token_ids called | num_requests={len(draft_token_ids.req_ids)}")
         for req_id, spec_token_ids in zip(
                 draft_token_ids.req_ids,
                 draft_token_ids.draft_token_ids,
         ):
             request = self.requests.get(req_id)
+            #logger.debug(f"[DEBUG] update_draft_token_ids | req_id={req_id} | spec_token_ids={len(spec_token_ids)} | request_exists={request is not None}")
             if request is None or request.is_finished():
                 # The request may have been finished. Skip.
                 continue
@@ -1082,13 +1376,21 @@ class Scheduler(SchedulerInterface):
             # Add newly generated spec token ids to the request.
             if not spec_token_ids:
                 # NOTE(woosuk): request.spec_token_ids should be updated.
-                request.spec_token_ids.clear()
+                request.spec_token_ids = []
             elif self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
                     spec_token_ids)
             else:
                 request.spec_token_ids = spec_token_ids
+
+            # # Debug: Log draft token updates for self-spec
+            # if self.use_self_specs and hasattr(request, 'self_spec_state'):
+            #     note = 'OVERRIDDEN at L316' if request.self_spec_state == SelfSpecState.VERIFYING else 'from n-gram'
+            #     logger.debug(f"[SELF_SPEC_NGRAM] Request {request.request_id}: update_draft_token_ids | "
+            #                  f"state={request.self_spec_state} | "
+            #                  f"draft_tokens={len(spec_token_ids)} | "
+            #                  f"note={note}")
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
@@ -1177,6 +1479,8 @@ class Scheduler(SchedulerInterface):
         self,
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
         kv_connector_stats: Optional[KVConnectorStats] = None,
+        # ===== SELF-SPEC ADDITIONS =====
+        self_spec_spec_decoding_stats: Optional[SpecDecodingStats] = None,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
@@ -1190,18 +1494,25 @@ class Scheduler(SchedulerInterface):
                               num_corrupted_reqs=sum(req.is_output_corrupted
                                                      for req in self.running),
                               kv_connector_stats=kv_connector_stats.data
-                              if kv_connector_stats else None)
+                              if kv_connector_stats else None,
+                              # ===== SELF-SPEC ADDITIONS =====
+                              self_spec_spec_decoding_stats=self_spec_spec_decoding_stats)
 
     def make_spec_decoding_stats(
         self,
         spec_decoding_stats: Optional[SpecDecodingStats],
         num_draft_tokens: int,
         num_accepted_tokens: int,
+        num_spec_tokens: Optional[int] = None,
     ) -> Optional[SpecDecodingStats]:
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+            # CRITICAL: The size MUST match what Prometheus counters were initialized with
+            # Otherwise we get IndexError when observing per-position stats
+            # Use provided num_spec_tokens, or fall back to self.num_spec_tokens
+            max_num_spec_tokens = num_spec_tokens if num_spec_tokens is not None else self.num_spec_tokens
+            spec_decoding_stats = SpecDecodingStats.new(max_num_spec_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted_tokens)
