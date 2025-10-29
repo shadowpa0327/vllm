@@ -67,6 +67,7 @@ if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; 
         --cuda-graph-trace=node \
         --delay=360 \
         --duration=10 \
+        -o "vanilla_vllm_${MODEL_NAME}_tp${TP_SIZE}" \
         python math_eval_orignal.py \
         --model_name_or_path "$MODEL_PATH" \
         --data_names "$DATASETS" \

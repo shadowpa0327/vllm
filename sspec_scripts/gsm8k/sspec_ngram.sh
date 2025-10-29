@@ -60,7 +60,7 @@ echo "  Block size: $SSPEC_NGRAM_BLOCK_SIZE"
 echo ""
 
 # Ensure we're in the correct directory
-cd /home/ubuntu/vllm/math_benchmarks_backup
+cd /home/ubuntu/vllm/math_benchmarks_backup1022
 
 # Build command with optional arguments
 CMD_ARGS=(

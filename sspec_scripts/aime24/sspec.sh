@@ -75,6 +75,7 @@ if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; 
         --cuda-graph-trace=node \
         --delay=360 \
         --duration=10 \
+        -o "sspec_${MODEL_NAME}_tp${TP_SIZE}" \
         python math_eval.py \
         --model_name_or_path "$MODEL_PATH" \
         --data_names "$DATASETS" \

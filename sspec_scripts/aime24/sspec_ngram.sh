@@ -41,8 +41,6 @@ SSPEC_NGRAM_BLOCK_SIZE="${SSPEC_NGRAM_BLOCK_SIZE:-1}"                           
 
 # Profiling options
 ENABLE_NSYS_PROFILING="${ENABLE_NSYS_PROFILING:-0}"
-NSYS_PROFILE_OUTPUT="${NSYS_PROFILE_OUTPUT:-self_spec_ngram_qwen3_8b_tp1}"
-NSYS_PROFILE_FORCE="${NSYS_PROFILE_FORCE:-true}"
 
 echo ""
 echo "Configuration:"
@@ -51,7 +49,7 @@ echo "  Datasets: $DATASETS"
 echo "  Samples per dataset: $NUM_SAMPLES"
 echo "  Output: $OUTPUT_DIR"
 if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; then
-    echo "  Nsight Systems profiling: enabled (output: $NSYS_PROFILE_OUTPUT)"
+    echo "  Nsight Systems profiling: enabled"
 else
     echo "  Nsight Systems profiling: disabled"
 fi
@@ -119,7 +117,7 @@ echo "Running self-spec n-gram test..."
 echo ""
 
 if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; then
-    echo "Profiling with Nsight Systems (delay=360s, duration=10s)"
+    echo "Profiling with Nsight Systems (delay=600s, duration=10s)"
     VLLM_NVTX_SCOPES_FOR_PROFILING=1 \
     CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}" \
     TOKENIZERS_PARALLELISM=false \
@@ -128,8 +126,7 @@ if [[ "$ENABLE_NSYS_PROFILING" == "1" || "$ENABLE_NSYS_PROFILING" == "true" ]]; 
         --cuda-graph-trace=node \
         --delay=600 \
         --duration=10 \
-        -o "$NSYS_PROFILE_OUTPUT" \
-        -f "$NSYS_PROFILE_FORCE" \
+        -o "sspec_ngram_${MODEL_NAME}_tp${TP_SIZE}" \
         "${RUN_CMD[@]}"
 else
     CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}" \
