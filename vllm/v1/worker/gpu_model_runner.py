@@ -2472,6 +2472,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         common_attn_metadata: CommonAttentionMetadata,
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        
+        # Check if speculative decoding should be disabled due to high batch size
+        disable_spec_decode = (
+            self.speculative_config.disable_by_batch_size is not None
+            and len(self.input_batch.req_ids) > 
+            self.speculative_config.disable_by_batch_size)
+        if disable_spec_decode:
+            # No speculative decoding is enabled due to high concurrency.
+            logger.debug(
+                "Speculative decoding disabled: batch size %d exceeds "
+                "threshold %d",
+                len(self.input_batch.req_ids),
+                self.speculative_config.disable_by_batch_size)
+            if isinstance(sampled_token_ids, list):
+                return [[] for _ in sampled_token_ids]
+            else:
+                # For tensor-based methods (e.g., EAGLE with padded batch)
+                batch_size = sampled_token_ids.shape[0]
+                return [[] for _ in range(batch_size)]
+        
         if self.speculative_config.method == "ngram":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
