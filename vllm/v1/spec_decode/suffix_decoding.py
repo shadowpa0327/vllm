@@ -100,4 +100,3 @@ class SuffixDecodingProposer:
     def load_model(self, *args, **kwargs):
         # No model to load.
         pass
-

@@ -282,9 +282,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.method == "suffix":
                 # Suffix decoding
-                from vllm.v1.spec_decode.suffix_decoding import (
-                    SuffixDecodingProposer)
-                self.drafter = SuffixDecodingProposer(self.vllm_config)
+                # Support both parallel and sequential implementations
+                # Controlled by suffix_decoding_use_parallel config parameter
+                use_parallel = self.speculative_config.suffix_decoding_use_parallel
+                
+                if use_parallel:
+                    from vllm.v1.spec_decode.suffix_decoding_parallel import (
+                        ParallelSuffixDecodingProposer)
+                    logger.info("Using ParallelSuffixDecodingProposer (batch operations)")
+                    self.drafter = ParallelSuffixDecodingProposer(self.vllm_config)
+                else:
+                    from vllm.v1.spec_decode.suffix_decoding import (
+                        SuffixDecodingProposer)
+                    logger.info("Using SuffixDecodingProposer (sequential, original implementation)")
+                    self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -2503,9 +2514,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elif self.speculative_config.method == "suffix":
             # Suffix decoding: propose drafts using suffix trees
             assert isinstance(sampled_token_ids, list)
+            # Support both parallel and sequential implementations
             from vllm.v1.spec_decode.suffix_decoding import (
                 SuffixDecodingProposer)
-            assert isinstance(self.drafter, SuffixDecodingProposer)
+            from vllm.v1.spec_decode.suffix_decoding_parallel import (
+                ParallelSuffixDecodingProposer)
+            assert isinstance(self.drafter, (SuffixDecodingProposer, ParallelSuffixDecodingProposer))
             draft_token_ids = self.drafter.propose(
                 input_batch=self.input_batch,
                 sampled_token_ids=sampled_token_ids)

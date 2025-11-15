@@ -122,6 +122,11 @@ class SpeculativeConfig:
     """The minimum token probability for suffix decoding. Will only speculate
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
+    suffix_decoding_use_parallel: bool = True
+    """Whether to use the parallel batch implementation for suffix decoding.
+    If True (default), uses ParallelSuffixDecodingProposer with batch operations
+    for better performance with large batch sizes (>=16). If False, uses the
+    original SuffixDecodingProposer (sequential) with global tree caching."""
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
