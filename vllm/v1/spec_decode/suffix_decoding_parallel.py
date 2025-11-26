@@ -23,7 +23,7 @@ class ParallelSuffixDecodingProposer:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        num_threads: int = 1,
+        num_threads: int = 8,
         parallel_threshold: int = 8,
     ):
         """

@@ -296,6 +296,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         SuffixDecodingProposer)
                     logger.info("Using SuffixDecodingProposer (sequential, original implementation)")
                     self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.method == "suffix_remote":
+                # Remote suffix decoding via gRPC server
+                from vllm.v1.spec_decode.suffix_decoding_remote import (
+                    RemoteSuffixDecodingProposer)
+                logger.info("Using RemoteSuffixDecodingProposer (gRPC client)")
+                self.drafter = RemoteSuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -2520,6 +2526,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             from vllm.v1.spec_decode.suffix_decoding_parallel import (
                 ParallelSuffixDecodingProposer)
             assert isinstance(self.drafter, (SuffixDecodingProposer, ParallelSuffixDecodingProposer))
+            draft_token_ids = self.drafter.propose(
+                input_batch=self.input_batch,
+                sampled_token_ids=sampled_token_ids)
+        elif self.speculative_config.method == "suffix_remote":
+            # Remote suffix decoding via gRPC server
+            assert isinstance(sampled_token_ids, list)
+            from vllm.v1.spec_decode.suffix_decoding_remote import (
+                RemoteSuffixDecodingProposer)
+            assert isinstance(self.drafter, RemoteSuffixDecodingProposer)
             draft_token_ids = self.drafter.propose(
                 input_batch=self.input_batch,
                 sampled_token_ids=sampled_token_ids)

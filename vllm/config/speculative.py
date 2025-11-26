@@ -33,7 +33,8 @@ logger = init_logger(__name__)
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
-                            "longcat_flash_mtp", "mtp", "suffix"]
+                            "longcat_flash_mtp", "mtp", "suffix",
+                            "suffix_remote"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -127,6 +128,11 @@ class SpeculativeConfig:
     If True (default), uses ParallelSuffixDecodingProposer with batch operations
     for better performance with large batch sizes (>=16). If False, uses the
     original SuffixDecodingProposer (sequential) with global tree caching."""
+    suffix_decoding_server_host: Optional[str] = None
+    """Host address for remote suffix decoding server (for suffix_remote method).
+    If not specified, the suffix_remote method cannot be used."""
+    suffix_decoding_server_port: int = 50051
+    """Port for remote suffix decoding server."""
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
@@ -258,6 +264,8 @@ class SpeculativeConfig:
                 self.model = "ngram"
             elif self.method == "suffix":
                 self.model = "suffix"
+            elif self.method == "suffix_remote":
+                self.model = "suffix_remote"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -304,6 +312,8 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "suffix_remote":
+            self._validate_suffix_remote()
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
@@ -479,6 +489,46 @@ class SpeculativeConfig:
             raise ValueError(
                 f"suffix_decoding_max_cached_requests="
                 f"{self.suffix_decoding_max_cached_requests} must be >= 0"
+            )
+
+        if self.suffix_decoding_max_spec_factor < 0:
+            raise ValueError(
+                f"suffix_decoding_max_spec_factor="
+                f"{self.suffix_decoding_max_spec_factor} must be >= 0"
+            )
+
+        if not 0 <= self.suffix_decoding_min_token_prob <= 1:
+            raise ValueError(
+                f"suffix_decoding_min_token_prob="
+                f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
+            )
+
+    def _validate_suffix_remote(self):
+        """Validate configuration for remote suffix decoding."""
+        if not has_arctic_inference():
+            raise ImportError(
+                "Arctic Inference is required for suffix_remote. "
+                "Install via `pip install arctic-inference==0.1.0`."
+            )
+
+        if self.suffix_decoding_server_host is None:
+            raise ValueError(
+                "suffix_decoding_server_host must be specified when using "
+                "suffix_remote method."
+            )
+
+        if self.num_speculative_tokens is None:
+            self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
+            logger.warning(
+                "Defaulted num_speculative_tokens to %s for suffix_remote.",
+                self.num_speculative_tokens,
+            )
+
+        # Validate values (same as suffix decoding)
+        if self.suffix_decoding_max_tree_depth < 1:
+            raise ValueError(
+                f"suffix_decoding_max_tree_depth="
+                f"{self.suffix_decoding_max_tree_depth} must be >= 1"
             )
 
         if self.suffix_decoding_max_spec_factor < 0:
