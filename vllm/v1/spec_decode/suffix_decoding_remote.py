@@ -47,16 +47,21 @@ class RemoteSuffixDecodingProposer:
 
         # Lazy import to avoid error when not used
         from arctic_inference.suffix_decoding.client import SuffixDecodingClient
+        import uuid
 
         self.client = SuffixDecodingClient(host=host, port=port)
+
+        # Generate a unique prefix to avoid request ID conflicts across workers
+        # When multiple workers share the same server, each needs unique request IDs
+        self.worker_prefix = str(uuid.uuid4())[:8] + "_"
 
         # Health check - fail fast if server is unavailable
         try:
             stats = self.client.get_stats()
             logger.info(
-                "Connected to suffix decoding server at %s:%d, "
+                "Connected to suffix decoding server at %s:%d (prefix=%s), "
                 "active_requests=%d, max_tree_depth=%d",
-                host, port,
+                host, port, self.worker_prefix,
                 stats['num_active_requests'],
                 stats['max_tree_depth']
             )
@@ -122,17 +127,20 @@ class RemoteSuffixDecodingProposer:
 
             index = input_batch.req_id_to_index[req_id]
 
+            # Add worker prefix to make request ID unique across workers
+            prefixed_req_id = self.worker_prefix + str(req_id)
+
             # Start new requests if needed
             if req_id not in self.active_requests:
                 num_prompt_tokens = input_batch.num_prompt_tokens[index]
                 prompt_token_ids = input_batch.token_ids_cpu[
                     index, :num_prompt_tokens]
-                # Start a new request on the server
-                self.client.start_request(req_id, prompt_token_ids.tolist())
+                # Start a new request on the server with prefixed ID
+                self.client.start_request(prefixed_req_id, prompt_token_ids.tolist())
                 self.active_requests.add(req_id)
 
-            # Collect tokens to add
-            req_ids_to_add_tokens.append(req_id)
+            # Collect tokens to add (use prefixed ID for server)
+            req_ids_to_add_tokens.append(prefixed_req_id)
             tokens_to_add.append(sampled_ids)
 
             # Collect contexts for speculation
@@ -140,7 +148,7 @@ class RemoteSuffixDecodingProposer:
             start = max(0, num_tokens - self.max_tree_depth)
             pattern = input_batch.token_ids_cpu[i, start:num_tokens]
 
-            req_ids_to_speculate.append(req_id)
+            req_ids_to_speculate.append(prefixed_req_id)
             contexts_to_speculate.append(pattern.tolist())
             max_spec_tokens_list.append(
                 min(self.num_speculative_tokens,
@@ -190,7 +198,9 @@ class RemoteSuffixDecodingProposer:
         completed_req_ids = self.active_requests - input_req_ids
 
         for req_id in completed_req_ids:
-            self.client.stop_request(req_id)
+            # Use prefixed ID when communicating with server
+            prefixed_req_id = self.worker_prefix + str(req_id)
+            self.client.stop_request(prefixed_req_id)
             self.active_requests.discard(req_id)
 
         return draft_token_ids

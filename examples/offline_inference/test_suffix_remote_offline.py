@@ -22,15 +22,34 @@ import sys
 import time
 import signal
 import atexit
+import importlib.util
+from pathlib import Path
 from typing import Optional
 
 # Server process handle
 server_process: Optional[subprocess.Popen] = None
 
 
+def get_arctic_inference_path() -> Optional[Path]:
+    """Get the path to the arctic_inference package."""
+    try:
+        spec = importlib.util.find_spec("arctic_inference")
+        if spec is None or spec.origin is None:
+            return None
+        # Get the package directory (parent of __init__.py)
+        package_path = Path(spec.origin).parent
+        return package_path
+    except Exception:
+        return None
+
+
 def start_server(port: int = 50051, max_tree_depth: int = 24) -> subprocess.Popen:
     """Start the suffix decoding gRPC server."""
     print(f"Starting suffix decoding server on port {port}...")
+
+    # Get arctic_inference package path for cwd if needed
+    arctic_path = get_arctic_inference_path()
+    cwd = str(arctic_path) if arctic_path else None
 
     proc = subprocess.Popen(
         [
@@ -41,7 +60,7 @@ def start_server(port: int = 50051, max_tree_depth: int = 24) -> subprocess.Pope
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        cwd="/home/cc2869/repositories/vllm/ArcticInference",
+        cwd=cwd,
     )
 
     # Wait for server to start
@@ -117,6 +136,7 @@ def main():
             },
             gpu_memory_utilization=0.8,
             disable_log_stats=False,
+            max_model_len=32768
         )
 
         # Test prompts - using repetitive text to help suffix matching
