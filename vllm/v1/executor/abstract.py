@@ -119,6 +119,10 @@ class Executor(ExecutorBase):
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))
 
+    def load_suffix_snapshot(self, snapshot: bytes) -> None:
+        """Broadcast suffix snapshot to all workers."""
+        self.collective_rpc("load_suffix_snapshot", args=(snapshot,))
+
 
 class UniProcExecutor(UniProcExecutorV0, Executor):
     pass

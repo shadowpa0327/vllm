@@ -198,6 +198,42 @@ class ParallelSuffixDecodingProposer:
         """
         return self.suffix_cache.get_stats()
 
+    def load_snapshot(self, snapshot: bytes) -> None:
+        """
+        Load a suffix tree snapshot from an external controller.
+
+        This method enables distributed pattern sharing by loading a snapshot
+        of accumulated patterns from a controller. Delegates to the underlying
+        ParallelSuffixDecodingCache.
+
+        Args:
+            snapshot: Binary snapshot created by SuffixTree.create_snapshot().
+                     Can be empty bytes or None to skip loading.
+        """
+        if not snapshot:
+            logger.debug("load_snapshot called with empty snapshot, skipping")
+            return
+
+        # Delegate to the cache's load_snapshot method
+        # The cache expects List[Tuple[int, bytes]], wrap single snapshot as tree 0
+        self.suffix_cache.load_snapshot([(0, snapshot)])
+        logger.info("Loaded suffix tree snapshot (%d bytes) into proposer",
+                    len(snapshot))
+
+    def create_snapshot(self) -> bytes:
+        """
+        Create a snapshot of the current suffix cache state.
+
+        Returns:
+            Binary snapshot that can be sent to a controller for aggregation.
+            Returns empty bytes if no trees exist.
+        """
+        snapshots = self.suffix_cache.create_snapshot()
+        if not snapshots:
+            return b''
+        # Return the first tree's snapshot (for single global tree use case)
+        return snapshots[0][1] if snapshots else b''
+
 
 logger = init_logger(__name__)
 

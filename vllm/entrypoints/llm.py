@@ -1412,6 +1412,22 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
+    def load_snapshot(self, snapshot: bytes) -> None:
+        """Load suffix tree snapshot for speculative decoding.
+
+        This enables distributed pattern sharing by loading patterns
+        accumulated by an external controller. Used with suffix decoding
+        speculative decoding method.
+
+        Args:
+            snapshot: Binary snapshot from SuffixTree.create_snapshot()
+
+        Note:
+            This method is only effective when using suffix decoding
+            (speculative_config.method="suffix").
+        """
+        self.llm_engine.load_suffix_snapshot(snapshot)
+
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         return self.llm_engine.reset_prefix_cache(device)
 

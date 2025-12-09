@@ -2657,6 +2657,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
+    def load_suffix_snapshot(self, snapshot: bytes) -> None:
+        """Load suffix tree snapshot into drafter for speculative decoding.
+
+        This enables distributed pattern sharing by loading patterns
+        accumulated by an external controller.
+
+        Args:
+            snapshot: Binary snapshot from SuffixTree.create_snapshot()
+        """
+        if hasattr(self, 'drafter') and hasattr(self.drafter, 'load_snapshot'):
+            self.drafter.load_snapshot(snapshot)
+
     def load_model(self, eep_scale_up: bool = False) -> None:
         """
         Args:
