@@ -297,14 +297,6 @@ class LLMEngine:
     def stop_profile(self):
         self.engine_core.profile(False)
 
-    def load_suffix_snapshot(self, snapshot: bytes) -> None:
-        """Load suffix tree snapshot for speculative decoding.
-
-        Args:
-            snapshot: Binary snapshot from SuffixTree.create_snapshot()
-        """
-        self.engine_core.load_suffix_snapshot(snapshot)
-
     def reset_mm_cache(self):
         self.processor.clear_cache()
         self.engine_core.reset_mm_cache()

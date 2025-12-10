@@ -123,9 +123,6 @@ class EngineCoreClient(ABC):
     def reset_prefix_cache(self) -> None:
         raise NotImplementedError
 
-    def load_suffix_snapshot(self, snapshot: bytes) -> None:
-        raise NotImplementedError
-
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
@@ -274,9 +271,6 @@ class InprocClient(EngineCoreClient):
 
     def reset_prefix_cache(self) -> None:
         self.engine_core.reset_prefix_cache()
-
-    def load_suffix_snapshot(self, snapshot: bytes) -> None:
-        self.engine_core.load_suffix_snapshot(snapshot)
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
@@ -723,9 +717,6 @@ class SyncMPClient(MPClient):
 
     def reset_prefix_cache(self) -> None:
         self.call_utility("reset_prefix_cache")
-
-    def load_suffix_snapshot(self, snapshot: bytes) -> None:
-        self.call_utility("load_suffix_snapshot", snapshot)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)

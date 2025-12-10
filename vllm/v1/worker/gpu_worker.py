@@ -215,10 +215,6 @@ class Worker(WorkerBase):
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
-    def load_suffix_snapshot(self, snapshot: bytes) -> None:
-        """RPC target: Load suffix snapshot into model runner."""
-        self.model_runner.load_suffix_snapshot(snapshot)
-
     def reload_weights(self) -> None:
         self.model_runner.reload_weights()
 

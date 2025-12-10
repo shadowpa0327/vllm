@@ -361,10 +361,6 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
-    def load_suffix_snapshot(self, snapshot: bytes) -> None:
-        """Load suffix snapshot for distributed speculation."""
-        self.model_executor.load_suffix_snapshot(snapshot)
-
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)

@@ -16,6 +16,7 @@ class ParallelSuffixDecodingProposer:
     - Uses batch_add_tokens() to add tokens to multiple trees in parallel
     - Uses batch_speculate() to perform speculation across multiple requests in parallel
     - Achieves ~2x speedup for batch sizes >= 32 with 4 threads
+    - Supports loading suffix tree snapshots with hash-based tree mapping
 
     For single-request or small batch workloads, use the original SuffixDecodingProposer.
     """
@@ -198,41 +199,57 @@ class ParallelSuffixDecodingProposer:
         """
         return self.suffix_cache.get_stats()
 
-    def load_snapshot(self, snapshot: bytes) -> None:
+    def load_snapshot(
+        self,
+        snapshots: list[tuple[int, bytes]],
+        hash_mapping: dict[str, int],
+    ) -> None:
         """
-        Load a suffix tree snapshot from an external controller.
+        Load suffix tree snapshots for hash-based tree matching.
 
-        This method enables distributed pattern sharing by loading a snapshot
-        of accumulated patterns from a controller. Delegates to the underlying
-        ParallelSuffixDecodingCache.
+        This method enables distributed pattern sharing by loading pre-built
+        suffix trees. New requests with matching prompt hash will automatically
+        reuse the corresponding pre-loaded tree.
 
         Args:
-            snapshot: Binary snapshot created by SuffixTree.create_snapshot().
-                     Can be empty bytes or None to skip loading.
+            snapshots: List of (tree_idx, snapshot_bytes) tuples from
+                ParallelSuffixDecodingCache.create_snapshot()
+            hash_mapping: Dict mapping prompt_hash -> tree_idx from
+                ParallelSuffixDecodingCache.create_snapshot(include_hash_mapping=True)
         """
-        if not snapshot:
-            logger.debug("load_snapshot called with empty snapshot, skipping")
+        if not snapshots:
+            logger.debug("load_snapshot called with empty snapshots, skipping")
             return
 
-        # Delegate to the cache's load_snapshot method
-        # The cache expects List[Tuple[int, bytes]], wrap single snapshot as tree 0
-        self.suffix_cache.load_snapshot([(0, snapshot)])
-        logger.info("Loaded suffix tree snapshot (%d bytes) into proposer",
-                    len(snapshot))
+        # Load trees into suffix cache with hash mapping for tree reuse
+        self.suffix_cache.load_snapshot(snapshots, hash_to_tree=hash_mapping)
 
-    def create_snapshot(self) -> bytes:
+        total_bytes = sum(len(s[1]) for s in snapshots)
+        logger.info(
+            "Loaded %d suffix trees (%d bytes total) with %d hash mappings",
+            len(snapshots), total_bytes, len(hash_mapping)
+        )
+
+    def create_snapshot(self) -> tuple[list[tuple[int, bytes]], dict[str, int]]:
         """
         Create a snapshot of the current suffix cache state.
 
         Returns:
-            Binary snapshot that can be sent to a controller for aggregation.
-            Returns empty bytes if no trees exist.
+            Tuple of (snapshots, hash_mapping) where:
+            - snapshots: List of (tree_idx, snapshot_bytes) tuples
+            - hash_mapping: Dict mapping prompt_hash -> tree_idx
         """
-        snapshots = self.suffix_cache.create_snapshot()
+        result = self.suffix_cache.create_snapshot(include_hash_mapping=True)
+        if isinstance(result, tuple):
+            snapshots, hash_mapping = result
+        else:
+            snapshots = result
+            hash_mapping = {}
+
         if not snapshots:
-            return b''
-        # Return the first tree's snapshot (for single global tree use case)
-        return snapshots[0][1] if snapshots else b''
+            return [], {}
+
+        return snapshots, hash_mapping
 
 
 logger = init_logger(__name__)

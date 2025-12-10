@@ -1412,21 +1412,36 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def load_snapshot(self, snapshot: bytes) -> None:
-        """Load suffix tree snapshot for speculative decoding.
+    def load_snapshot(
+        self,
+        snapshots: list[tuple[int, bytes]],
+        hash_mapping: dict[str, int],
+    ) -> None:
+        """Load suffix tree snapshots for speculative decoding.
 
-        This enables distributed pattern sharing by loading patterns
-        accumulated by an external controller. Used with suffix decoding
-        speculative decoding method.
+        Loads pre-built suffix trees with hash-based prompt matching.
+        Requests with identical prompts will automatically reuse the
+        same tree for improved speculation.
 
         Args:
-            snapshot: Binary snapshot from SuffixTree.create_snapshot()
+            snapshots: List of (tree_idx, snapshot_bytes) tuples from
+                ParallelSuffixDecodingCache.create_snapshot()
+            hash_mapping: Dict mapping prompt_hash -> tree_idx from
+                ParallelSuffixDecodingCache.create_snapshot(include_hash_mapping=True)
 
-        Note:
-            This method is only effective when using suffix decoding
-            (speculative_config.method="suffix").
+        Example:
+            snapshots, hash_mapping = cache.create_snapshot(include_hash_mapping=True)
+            llm.load_snapshot(snapshots, hash_mapping)
         """
-        self.llm_engine.load_suffix_snapshot(snapshot)
+        model_runner = (
+            self.llm_engine
+            .model_executor
+            .driver_worker
+            .worker
+            .model_runner
+        )
+        if hasattr(model_runner, 'drafter') and hasattr(model_runner.drafter, 'load_snapshot'):
+            model_runner.drafter.load_snapshot(snapshots, hash_mapping)
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         return self.llm_engine.reset_prefix_cache(device)
