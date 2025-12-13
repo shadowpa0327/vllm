@@ -118,8 +118,12 @@ class ParallelSuffixDecodingProposer:
                 # (no global tree), so we just start new requests directly
                 num_prompt_tokens = input_batch.num_prompt_tokens[index]
                 prompt_token_ids = input_batch.token_ids_cpu[index, :num_prompt_tokens]
+                # Use pre-computed hash if available (ensures consistency with trainer)
+                pre_computed_hash = input_batch.prompt_hashes.get(req_id)
                 # Start a new request, this will build the suffix tree for that prompt.
-                self.suffix_cache.start_request(req_id, prompt_token_ids)
+                self.suffix_cache.start_request(
+                    req_id, prompt_token_ids, pre_computed_hash=pre_computed_hash
+                )
 
             # Collect tokens to add (for batch_add_tokens)
             req_ids_to_add_tokens.append(req_id)
