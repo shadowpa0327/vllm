@@ -280,6 +280,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "suffix":
+                # Suffix decoding
+                # Support both parallel and sequential implementations
+                # Controlled by suffix_decoding_use_parallel config parameter
+                use_parallel = self.speculative_config.suffix_decoding_use_parallel
+                
+                if use_parallel:
+                    from vllm.v1.spec_decode.suffix_decoding_parallel import (
+                        ParallelSuffixDecodingProposer)
+                    logger.info("Using ParallelSuffixDecodingProposer (batch operations)")
+                    self.drafter = ParallelSuffixDecodingProposer(self.vllm_config)
+                else:
+                    from vllm.v1.spec_decode.suffix_decoding import (
+                        SuffixDecodingProposer)
+                    logger.info("Using SuffixDecodingProposer (sequential, original implementation)")
+                    self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.method == "suffix_remote":
+                # Remote suffix decoding via gRPC server
+                from vllm.v1.spec_decode.suffix_decoding_remote import (
+                    RemoteSuffixDecodingProposer)
+                logger.info("Using RemoteSuffixDecodingProposer (gRPC client)")
+                self.drafter = RemoteSuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -2467,6 +2489,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         common_attn_metadata: CommonAttentionMetadata,
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        
+        # Check if speculative decoding should be disabled due to high batch size
+        disable_spec_decode = (
+            self.speculative_config.disable_by_batch_size is not None
+            and len(self.input_batch.req_ids) > 
+            self.speculative_config.disable_by_batch_size)
+        if disable_spec_decode:
+            # No speculative decoding is enabled due to high concurrency.
+            logger.debug(
+                "Speculative decoding disabled: batch size %d exceeds "
+                "threshold %d",
+                len(self.input_batch.req_ids),
+                self.speculative_config.disable_by_batch_size)
+            if isinstance(sampled_token_ids, list):
+                return [[] for _ in sampled_token_ids]
+            else:
+                # For tensor-based methods (e.g., EAGLE with padded batch)
+                batch_size = sampled_token_ids.shape[0]
+                return [[] for _ in range(batch_size)]
+        
         if self.speculative_config.method == "ngram":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
@@ -2475,6 +2517,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs)
+        elif self.speculative_config.method == "suffix":
+            # Suffix decoding: propose drafts using suffix trees
+            assert isinstance(sampled_token_ids, list)
+            # Support both parallel and sequential implementations
+            from vllm.v1.spec_decode.suffix_decoding import (
+                SuffixDecodingProposer)
+            from vllm.v1.spec_decode.suffix_decoding_parallel import (
+                ParallelSuffixDecodingProposer)
+            assert isinstance(self.drafter, (SuffixDecodingProposer, ParallelSuffixDecodingProposer))
+            draft_token_ids = self.drafter.propose(
+                input_batch=self.input_batch,
+                sampled_token_ids=sampled_token_ids)
+        elif self.speculative_config.method == "suffix_remote":
+            # Remote suffix decoding via gRPC server
+            assert isinstance(sampled_token_ids, list)
+            from vllm.v1.spec_decode.suffix_decoding_remote import (
+                RemoteSuffixDecodingProposer)
+            assert isinstance(self.drafter, RemoteSuffixDecodingProposer)
+            draft_token_ids = self.drafter.propose(
+                input_batch=self.input_batch,
+                sampled_token_ids=sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)

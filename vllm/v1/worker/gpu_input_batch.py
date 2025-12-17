@@ -275,6 +275,11 @@ class InputBatch:
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
+        # Pre-computed prompt hashes for suffix tree lookup (req_id -> hash)
+        # Used by speculative decoding to ensure hash consistency between
+        # tree building (trainer) and tree lookup (inference).
+        self.prompt_hashes: dict[str, str] = {}
+
         # Cached reference to the GPU tensor of previously sampled tokens
         self.prev_sampled_token_ids: Optional[torch.Tensor] = None
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
@@ -420,6 +425,12 @@ class InputBatch:
             if sampling_params.bad_words_token_ids:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
+
+            # Extract pre-computed prompt hash for suffix tree lookup
+            if sampling_params.extra_args:
+                prompt_hash = sampling_params.extra_args.get("prompt_hash")
+                if prompt_hash:
+                    self.prompt_hashes[req_id] = prompt_hash
         elif pooling_params := request.pooling_params:
             self.pooling_params[req_id] = pooling_params
             self.logits_processing_needs_token_ids[req_index] = (
@@ -495,6 +506,7 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+        self.prompt_hashes.pop(req_id, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:

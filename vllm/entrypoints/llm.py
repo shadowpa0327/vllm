@@ -1412,6 +1412,37 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
+    def load_snapshot(
+        self,
+        snapshots: list[tuple[int, bytes]],
+        hash_mapping: dict[str, int],
+    ) -> None:
+        """Load suffix tree snapshots for speculative decoding.
+
+        Loads pre-built suffix trees with hash-based prompt matching.
+        Requests with identical prompts will automatically reuse the
+        same tree for improved speculation.
+
+        Args:
+            snapshots: List of (tree_idx, snapshot_bytes) tuples from
+                ParallelSuffixDecodingCache.create_snapshot()
+            hash_mapping: Dict mapping prompt_hash -> tree_idx from
+                ParallelSuffixDecodingCache.create_snapshot(include_hash_mapping=True)
+
+        Example:
+            snapshots, hash_mapping = cache.create_snapshot(include_hash_mapping=True)
+            llm.load_snapshot(snapshots, hash_mapping)
+        """
+        model_runner = (
+            self.llm_engine
+            .model_executor
+            .driver_worker
+            .worker
+            .model_runner
+        )
+        if hasattr(model_runner, 'drafter') and hasattr(model_runner.drafter, 'load_snapshot'):
+            model_runner.drafter.load_snapshot(snapshots, hash_mapping)
+
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         return self.llm_engine.reset_prefix_cache(device)
 
