@@ -26,7 +26,19 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-# Import directly from ArcticInference to avoid vLLM import issues
+# =============================================================================
+# Import Note: Why we import from arctic_inference instead of vLLM
+# =============================================================================
+# The vLLM proposer (ParallelSuffixDecodingProposer) is located at:
+#   - vllm/v1/spec_decode/suffix_decoding_parallel.py
+#
+# However, importing from vLLM triggers heavy dependencies (CUDA, torch.distributed,
+# model configs) that cause circular imports when running standalone benchmarks.
+# Even vLLM itself uses lazy imports for this reason (see suffix_decoding.py:23).
+#
+# We import directly from arctic_inference, which provides the underlying cache:
+#   - ParallelSuffixDecodingCache: arctic_inference/suffix_decoding/parallel_cache.py
+# =============================================================================
 try:
     from arctic_inference.suffix_decoding import ParallelSuffixDecodingCache
 except ImportError:
