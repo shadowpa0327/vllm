@@ -66,6 +66,7 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -1048,6 +1049,40 @@ class Worker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
+    def _resolve_weight_update_target(
+        self, target_model: str
+    ) -> tuple[nn.Module, "ModelConfig"]:
+        if target_model == "main":
+            return self.model_runner.model, self.model_config
+
+        if target_model == "drafter":
+            drafter = getattr(self.model_runner, "drafter", None)
+            if drafter is None:
+                raise RuntimeError(
+                    "target_model='drafter' requested but no drafter is configured. "
+                    "Enable speculative decoding to update drafter weights."
+                )
+            drafter_model = getattr(drafter, "model", None)
+            if drafter_model is None:
+                raise RuntimeError(
+                    "target_model='drafter' requested but drafter type "
+                    f"{type(drafter).__name__} does not expose a loaded model."
+                )
+
+            spec_config = self.vllm_config.speculative_config
+            drafter_model_config = (
+                spec_config.draft_model_config
+                if spec_config is not None
+                and spec_config.draft_model_config is not None
+                else self.model_config
+            )
+            return drafter_model, drafter_model_config
+
+        raise ValueError(
+            f"Unknown target_model '{target_model}'. "
+            "Supported values are 'main' and 'drafter'."
+        )
+
     def update_weights(self, update_info: dict) -> None:
         """
         Batched weight update from the trainer.
@@ -1063,8 +1098,9 @@ class Worker(WorkerBase):
 
         # Parse dict into backend-specific typed dataclass
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
-
-        model = self.model_runner.model
+        model, model_config = self._resolve_weight_update_target(
+            typed_update_info.target_model
+        )
 
         if typed_update_info.is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import (
@@ -1079,7 +1115,7 @@ class Worker(WorkerBase):
                     typed_update_info,
                     load_weights=model.load_weights,
                 )
-                finalize_layerwise_reload(model, self.model_config)
+                finalize_layerwise_reload(model, model_config)
         else:
             # Weights are already in kernel format, copy directly
             def load_weights_direct(

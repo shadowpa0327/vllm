@@ -140,6 +140,25 @@ class TestNCCLEngineParsing:
         assert update_info.names == ["w1", "w2"]
         assert update_info.dtype_names == ["float32", "bfloat16"]
         assert update_info.shapes == [[100, 100], [50]]
+        assert update_info.target_model == "main"
+
+    def test_parse_update_info_with_target_model(self):
+        """Test parsing update info with explicit target model."""
+        config = WeightTransferConfig(backend="nccl")
+        parallel_config = create_mock_parallel_config()
+        engine = NCCLWeightTransferEngine(config, parallel_config)
+
+        update_info = engine.parse_update_info(
+            {
+                "names": ["w1"],
+                "dtype_names": ["float32"],
+                "shapes": [[100, 100]],
+                "target_model": "drafter",
+            }
+        )
+
+        assert isinstance(update_info, NCCLWeightTransferUpdateInfo)
+        assert update_info.target_model == "drafter"
 
 
 # --- Unit Tests: Engine Registry ---

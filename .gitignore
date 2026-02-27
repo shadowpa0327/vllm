@@ -186,9 +186,10 @@ cython_debug/
 # VSCode
 .vscode/
 
-# Claude
+# Claude - personal files (keep .claude/skills/ tracked for team sharing)
 CLAUDE.md
-.claude/
+.claude/settings.local.json
+.claude/projects/
 
 # Codex
 AGENTS.md
