@@ -383,9 +383,9 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
-            return {}, False
-        scheduler_output = self.scheduler.schedule()
-        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+            return {}, False 
+        scheduler_output = self.scheduler.schedule() #NOTE(CCC) shcedule
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)  #NOTE(CCC) Run model
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.log_error_detail(scheduler_output),
@@ -393,7 +393,7 @@ class EngineCore:
         ):
             model_output = future.result()
             if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)
+                model_output = self.model_executor.sample_tokens(grammar_output) #NOTE(CCC) Sampling after model execution
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.

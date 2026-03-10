@@ -1711,7 +1711,24 @@ class GPUModelRunner(
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
-
+        
+        # ── Educational Trace: Ragged Input Preparation ────────────────
+        print("\n" + "=" * 72)
+        print("  STEP 1 · _prepare_inputs — Building ragged batch tensors")
+        print("=" * 72)
+        print(f"  Num requests in batch    : {num_reqs}")
+        print(f"  Total scheduled tokens   : {total_num_scheduled_tokens}")
+        print(f"  Tokens per request       : {num_scheduled_tokens.tolist()}")
+        print(f"  Cumulative token offsets  : {cu_num_tokens.tolist()}")
+        if spec_decode_metadata is not None:
+            print(f"  Spec decode active       : YES")
+            print(f"    Draft tokens per req   : {spec_decode_metadata.num_draft_tokens}")
+            print(f"    Draft token IDs        : {spec_decode_metadata.draft_token_ids}")
+            print(f"    Logits indices (all)   : {logits_indices}")
+        else:
+            print(f"  Spec decode active       : NO (standard prefill/decode)")
+            print(f"  Logits indices           : {logits_indices}")
+        print("=" * 72 + "\n")
         return (
             logits_indices,
             spec_decode_metadata,
@@ -3424,7 +3441,9 @@ class GPUModelRunner(
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+            
 
+            # NOTE(CCC): Prepare inputs_data from scheduler_output. 
             logits_indices, spec_decode_metadata = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
@@ -3585,6 +3604,16 @@ class GPUModelRunner(
                 scheduler_output, clear_metadata=clear_kv_metadata
             ) as kv_connector_output,
         ):
+            # ── Educational Trace: Model Forward Pass ───────────────────
+            print("\n" + "=" * 72)
+            print("  STEP 2 · execute_model — Flattened ragged tensor → model forward")
+            print("=" * 72)
+            print(f"  input_ids shape          : {input_ids.shape}")
+            print(f"  input_ids (flat ragged)  : {input_ids}")
+            print(f"  positions shape          : {positions.shape}")
+            print(f"  num_tokens_padded        : {num_tokens_padded}")
+            print("=" * 72 + "\n")
+
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -3714,6 +3743,65 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
+        # ── Educational Trace: Sampling & Spec Decode Verification ──
+        print("\n" + "=" * 72)
+        print("  STEP 3 · SAMPLE_TOKENS — Sampling + spec decode verification")
+        print("=" * 72)
+        if spec_decode_metadata is None:
+            print("  Mode: Standard sampling (no speculation)")
+            print(f"  Logits shape           : {logits.shape if logits is not None else None}  "
+                  f"([batch_size, vocab_size])")
+            print(f"  Sampled token IDs shape: {sampler_output.sampled_token_ids.shape}")
+        else:
+            print("  Mode: Rejection sampling (verifying draft tokens)")
+            _n_draft = sum(spec_decode_metadata.num_draft_tokens)
+            _bs = len(spec_decode_metadata.num_draft_tokens)
+            print()
+            print(f"  Logits shape           : {logits.shape if logits is not None else None}")
+            print(f"    = [{_n_draft} draft + {_bs} bonus, vocab_size]")
+            print(f"    logits[target_logits_indices] → draft position logits  "
+                  f"({_n_draft} rows)")
+            print(f"    logits[bonus_logits_indices]  → bonus position logits  "
+                  f"({_bs} rows)")
+            print()
+            print(f"  Draft token IDs        : {spec_decode_metadata.draft_token_ids}")
+            print(f"  Num draft per request  : {spec_decode_metadata.num_draft_tokens}")
+            print(f"  Target logits indices  : {spec_decode_metadata.target_logits_indices}")
+            print(f"  Bonus logits indices   : {spec_decode_metadata.bonus_logits_indices}")
+            _out_ids = sampler_output.sampled_token_ids
+            print(f"  Output token IDs shape : {_out_ids.shape}  "
+                  f"(batch_size x [max_spec_len+1])")
+            print(f"  Output token IDs       : {_out_ids}")
+            # Count accepted tokens per request:
+            # Non-placeholder (-1) entries = accepted + recovered + bonus
+            _valid = (_out_ids != -1)
+            _accepted_per_req = _valid.sum(dim=1).tolist()
+            _total_accepted = sum(_accepted_per_req)
+            _total_drafted = sum(spec_decode_metadata.num_draft_tokens)
+            # Max possible output = num_draft + 1 (bonus) per request
+            _max_possible = [n + 1 for n in spec_decode_metadata.num_draft_tokens]
+            print()
+            print("  Acceptance breakdown per request:")
+            for i, (got, drafted, maxp) in enumerate(
+                zip(_accepted_per_req, spec_decode_metadata.num_draft_tokens, _max_possible)
+            ):
+                # got = accepted+recovered+bonus; drafted = num draft tokens
+                # If got == drafted+1, all drafts accepted (+ bonus token)
+                # If got < drafted+1, rejection happened at position `got`
+                if drafted == 0:
+                    status = "no drafts (prefill/chunked)"
+                elif got == drafted + 1:
+                    status = f"ALL {drafted} drafts accepted + 1 bonus"
+                else:
+                    status = (f"{got - 1}/{drafted} drafts accepted, "
+                              f"rejected at position {got - 1}")
+                print(f"    req[{i}]: {got}/{maxp} tokens output  — {status}")
+            print(f"\n  Summary: {_total_accepted} tokens output "
+                  f"from {_total_drafted} drafted  "
+                  f"(acceptance ≈ {(_total_accepted - len(_accepted_per_req))}/{_total_drafted} "
+                  f"= {(_total_accepted - len(_accepted_per_req)) / max(_total_drafted, 1) * 100:.1f}%)")
+        print("=" * 72 + "\n")
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
