@@ -863,22 +863,22 @@ class Worker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def _resolve_weight_update_target(
-        self, target_model: str
+        self, update_target: str
     ) -> tuple[nn.Module, "ModelConfig"]:
-        if target_model == "main":
+        if update_target == "main":
             return self.model_runner.model, self.model_config
 
-        if target_model == "drafter":
+        if update_target == "drafter":
             drafter = getattr(self.model_runner, "drafter", None)
             if drafter is None:
                 raise RuntimeError(
-                    "target_model='drafter' requested but no drafter is configured. "
+                    "update_target='drafter' requested but no drafter is configured. "
                     "Enable speculative decoding to update drafter weights."
                 )
             drafter_model = getattr(drafter, "model", None)
             if drafter_model is None:
                 raise RuntimeError(
-                    "target_model='drafter' requested but drafter type "
+                    "update_target='drafter' requested but drafter type "
                     f"{type(drafter).__name__} does not expose a loaded model."
                 )
 
@@ -893,7 +893,7 @@ class Worker(WorkerBase):
             return drafter_model, drafter_model_config
 
         raise ValueError(
-            f"Unknown target_model '{target_model}'. "
+            f"Unknown update_target '{update_target}'. "
             "Supported values are 'main' and 'drafter'."
         )
 
@@ -968,9 +968,10 @@ class Worker(WorkerBase):
         if shared:
             logger.warning_once(
                 "Drafter model shares %s with the main model. Weight updates "
-                "targeting 'drafter' that include these parameter names will "
-                "also overwrite the main model's weights. Route shared-parameter "
-                "updates through target_model='main' to avoid this.",
+                "with update_target='drafter' that include these parameter "
+                "names will also overwrite the main model's weights. Route "
+                "shared-parameter updates through update_target='main' to "
+                "avoid this.",
                 shared,
             )
 
@@ -990,14 +991,14 @@ class Worker(WorkerBase):
         # Parse dict into backend-specific typed dataclass
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
         model, model_config = self._resolve_weight_update_target(
-            typed_update_info.target_model
+            typed_update_info.update_target
         )
 
         # When updating the drafter, skip any parameter whose storage is
         # physically shared with the main model to avoid silently corrupting
         # production weights via EAGLE/EAGLE3/MTP shared embed_tokens/lm_head.
         shared_names: set[str] = set()
-        if typed_update_info.target_model == "drafter":
+        if typed_update_info.update_target == "drafter":
             shared_names = self._collect_shared_param_names(model)
 
         def _filter_shared(
@@ -1008,7 +1009,7 @@ class Worker(WorkerBase):
                     logger.warning_once(
                         "Dropping drafter weight update for '%s': this "
                         "parameter's storage is shared with the main model. "
-                        "Route shared-parameter updates via target_model='main'.",
+                        "Route shared-parameter updates via update_target='main'.",
                         name,
                     )
                     continue
