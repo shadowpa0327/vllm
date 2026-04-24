@@ -218,16 +218,17 @@ def test_update_weights_calls_engine():
         def check_update_called(self):
             engine = self.weight_transfer_engine
             if not engine.receive_weights_called:
-                return False, None, None, None
+                return False, None, None, None, None
             info = engine.last_update_info
-            return (True, info.names, info.dtype_names, info.shapes)
+            return (True, info.names, info.dtype_names, info.shapes, info.update_target)
 
         results = llm.collective_rpc(check_update_called)
-        for called, names, dtypes, shapes in results:
+        for called, names, dtypes, shapes, update_target in results:
             assert called, "receive_weights should have been called"
             assert names == test_names
             assert dtypes == test_dtypes
             assert shapes == test_shapes
+            assert update_target == "main"
 
 
 @create_new_process_for_each_test()
@@ -281,6 +282,11 @@ def test_full_weight_transfer_flow():
                 "update_names": (
                     engine.last_update_info.names if engine.last_update_info else None
                 ),
+                "update_target": (
+                    engine.last_update_info.update_target
+                    if engine.last_update_info
+                    else None
+                ),
             }
 
         results = llm.collective_rpc(check_flow)
@@ -289,6 +295,7 @@ def test_full_weight_transfer_flow():
             assert result["update_called"], "receive_weights should be called"
             assert result["init_param"] == "flow_test"
             assert result["update_names"] == ["test.weight"]
+            assert result["update_target"] == "main"
 
 
 @create_new_process_for_each_test()

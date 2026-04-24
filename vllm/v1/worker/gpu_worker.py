@@ -4,7 +4,7 @@
 
 import gc
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import TYPE_CHECKING, Any
@@ -64,6 +64,7 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -861,6 +862,119 @@ class Worker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
+    def _resolve_weight_update_target(
+        self, update_target: str
+    ) -> tuple[nn.Module, "ModelConfig"]:
+        if update_target == "main":
+            return self.model_runner.model, self.model_config
+
+        if update_target == "drafter":
+            drafter = getattr(self.model_runner, "drafter", None)
+            if drafter is None:
+                raise RuntimeError(
+                    "update_target='drafter' requested but no drafter is configured. "
+                    "Enable speculative decoding to update drafter weights."
+                )
+            drafter_model = getattr(drafter, "model", None)
+            if drafter_model is None:
+                raise RuntimeError(
+                    "update_target='drafter' requested but drafter type "
+                    f"{type(drafter).__name__} does not expose a loaded model."
+                )
+
+            spec_config = self.vllm_config.speculative_config
+            drafter_model_config = (
+                spec_config.draft_model_config
+                if spec_config is not None
+                and spec_config.draft_model_config is not None
+                else self.model_config
+            )
+            self._warn_if_drafter_shares_params(drafter_model)
+            return drafter_model, drafter_model_config
+
+        raise ValueError(
+            f"Unknown update_target '{update_target}'. "
+            "Supported values are 'main' and 'drafter'."
+        )
+
+    def _collect_shared_param_names(self, drafter_model: nn.Module) -> set[str]:
+        """Return drafter parameter names whose storage is the main model's.
+
+        EAGLE/EAGLE3/MTP drafters may share embed_tokens and/or lm_head with
+        the target via direct module assignment. Such parameters appear in
+        both models' named_parameters() with the same data_ptr — writes to
+        them via a "drafter" update would silently corrupt the main model.
+        """
+        from vllm.model_executor.models.interfaces import supports_multimodal
+
+        target = self.model_runner.model
+        if supports_multimodal(target):
+            target = target.get_language_model()
+
+        target_ptrs = {
+            p.data_ptr() for p in target.parameters() if p.is_floating_point()
+        }
+        return {
+            name
+            for name, p in drafter_model.named_parameters()
+            if p.is_floating_point() and p.data_ptr() in target_ptrs
+        }
+
+    def _warn_if_drafter_shares_params(self, drafter_model: nn.Module) -> None:
+        """Detect embed_tokens / lm_head sharing between drafter and main model.
+
+        EAGLE/EAGLE3/MTP drafters may share embed_tokens and/or lm_head with the
+        target model via direct module assignment (see SpecDecodeBaseProposer
+        ._maybe_share_embeddings and ._maybe_share_lm_head). When shared, writing
+        those parameters via a "drafter" update will also mutate the main model.
+        """
+        from vllm.model_executor.models.interfaces import supports_multimodal
+
+        target = self.model_runner.model
+        if supports_multimodal(target):
+            target = target.get_language_model()
+
+        target_inner = getattr(target, "model", None)
+        target_embed = (
+            getattr(target_inner, "embed_tokens", None)
+            or getattr(target_inner, "embedding", None)
+            if target_inner is not None
+            else None
+        )
+        target_lm_head = getattr(target, "lm_head", None)
+
+        drafter_inner = getattr(drafter_model, "model", None)
+        drafter_embed = (
+            getattr(drafter_inner, "embed_tokens", None)
+            if drafter_inner is not None
+            else None
+        )
+        drafter_lm_head = getattr(drafter_model, "lm_head", None)
+
+        shared = []
+        if (
+            drafter_embed is not None
+            and target_embed is not None
+            and drafter_embed is target_embed
+        ):
+            shared.append("embed_tokens")
+        if (
+            drafter_lm_head is not None
+            and target_lm_head is not None
+            and drafter_lm_head is target_lm_head
+        ):
+            shared.append("lm_head")
+
+        if shared:
+            logger.warning_once(
+                "Drafter model shares %s with the main model. Weight updates "
+                "with update_target='drafter' that include these parameter "
+                "names will also overwrite the main model's weights. Route "
+                "shared-parameter updates through update_target='main' to "
+                "avoid this.",
+                shared,
+            )
+
     def update_weights(self, update_info: dict) -> None:
         """
         Batched weight update from the trainer.
@@ -876,8 +990,30 @@ class Worker(WorkerBase):
 
         # Parse dict into backend-specific typed dataclass
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        model, model_config = self._resolve_weight_update_target(
+            typed_update_info.update_target
+        )
 
-        model = self.model_runner.model
+        # When updating the drafter, skip any parameter whose storage is
+        # physically shared with the main model to avoid silently corrupting
+        # production weights via EAGLE/EAGLE3/MTP shared embed_tokens/lm_head.
+        shared_names: set[str] = set()
+        if typed_update_info.update_target == "drafter":
+            shared_names = self._collect_shared_param_names(model)
+
+        def _filter_shared(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterator[tuple[str, torch.Tensor]]:
+            for name, weight in weights:
+                if name in shared_names:
+                    logger.warning_once(
+                        "Dropping drafter weight update for '%s': this "
+                        "parameter's storage is shared with the main model. "
+                        "Route shared-parameter updates via update_target='main'.",
+                        name,
+                    )
+                    continue
+                yield name, weight
 
         if typed_update_info.is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import (
@@ -890,15 +1026,17 @@ class Worker(WorkerBase):
                 initialize_layerwise_reload(model)
                 self.weight_transfer_engine.receive_weights(
                     typed_update_info,
-                    load_weights=model.load_weights,
+                    load_weights=lambda weights: model.load_weights(
+                        _filter_shared(weights)
+                    ),
                 )
-                finalize_layerwise_reload(model, self.model_config)
+                finalize_layerwise_reload(model, model_config)
         else:
             # Weights are already in kernel format, copy directly
             def load_weights_direct(
                 weights: list[tuple[str, torch.Tensor]],
             ) -> None:
-                for name, weight in weights:
+                for name, weight in _filter_shared(weights):
                     param = model.get_parameter(name)
                     param.copy_(weight)
 

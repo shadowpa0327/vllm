@@ -33,6 +33,13 @@ class WeightTransferUpdateInfo(ABC):  # noqa: B024
     """Set to True if weights are in checkpoint/original model format and need
     layerwise processing. Set to False if weights have already been processed
     into kernel format (repacking, renaming, etc.)."""
+    update_target: str = "main"
+    """Which model this update writes to.
+    "main" updates the main target model.
+    "drafter" updates the speculative decoding drafter model.
+    Named `update_target` (not `target_model`) to avoid confusion with the
+    existing "target model" terminology in speculative decoding, where the
+    "target" is always the main model being drafted for."""
 
 
 # API-level request classes (accept dicts for backend-agnostic serialization)
