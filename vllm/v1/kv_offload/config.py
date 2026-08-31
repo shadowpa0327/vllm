@@ -4,7 +4,9 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+OffloadingCacheKind = Literal["attention", "mamba", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -14,6 +16,10 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Physical cache family represented by this group.
+    cache_kind: OffloadingCacheKind = "attention"
+    # Unpadded KV bytes stored by one worker for one block in this group.
+    worker_kv_bytes_per_block: int = 0
 
 
 @dataclass(frozen=True)
@@ -74,3 +80,6 @@ class OffloadingConfig:
     # support it. Aggregate layout decision; per-layer replication metadata
     # is planned for CanonicalKVCacheRef (#48408).
     replicated_layout: bool = False
+    # True when all groups alias one packed physical page. Group-isolated
+    # backends must fail closed because bytes cannot be assigned to one group.
+    packed_layout: bool = False

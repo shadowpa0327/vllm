@@ -256,6 +256,7 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     )
 
     assert offloading_config.worker_kv_bytes_per_block == 16
+    assert offloading_config.packed_layout is packed
     assert offloading_config.parallel.world_size == 6
     assert offloading_config.cache.blocks_per_chunk == 2
 
@@ -303,6 +304,13 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
         32,
         16,
     )
+    assert tuple(group.cache_kind for group in offloading_config.groups) == (
+        "attention",
+        "mamba",
+    )
+    assert tuple(
+        group.worker_kv_bytes_per_block for group in offloading_config.groups
+    ) == (65536, 4)
     scheduler_config = SchedulerOffloadConfig.from_spec(
         MockOffloadingSpec(offloading_config),
         config,

@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Translate vLLM KV cache metadata for native offloading backends."""
 
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Literal
 
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    MambaSpec,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -20,7 +23,46 @@ from vllm.v1.kv_offload.config import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVCacheSpec,
+        KVCacheTensor,
+    )
+
+
+def _group_layer_specs(
+    kv_cache_group: "KVCacheGroupSpec",
+) -> tuple["KVCacheSpec", ...]:
+    group_spec = kv_cache_group.kv_cache_spec
+    if isinstance(group_spec, UniformTypeKVCacheSpecs):
+        return tuple(
+            group_spec.kv_cache_specs[name] for name in kv_cache_group.layer_names
+        )
+    return tuple(group_spec for _ in kv_cache_group.layer_names)
+
+
+def _group_cache_kind(
+    kv_cache_group: "KVCacheGroupSpec",
+) -> Literal["attention", "mamba", "unknown"]:
+    layer_specs = _group_layer_specs(kv_cache_group)
+    if all(isinstance(spec, AttentionSpec) for spec in layer_specs):
+        return "attention"
+    if all(isinstance(spec, MambaSpec) for spec in layer_specs):
+        return "mamba"
+    return "unknown"
+
+
+def _group_worker_bytes_per_block(kv_cache_group: "KVCacheGroupSpec") -> int:
+    total = 0
+    for layer_spec in _group_layer_specs(kv_cache_group):
+        if isinstance(layer_spec, AttentionSpec):
+            total += layer_spec.unpadded_page_size_bytes
+        elif isinstance(layer_spec, MambaSpec):
+            total += replace(layer_spec, page_size_padded=None).page_size_bytes
+        else:
+            total += layer_spec.page_size_bytes
+    return total
 
 
 def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
@@ -51,6 +93,8 @@ def build_offloading_config(
                 )
             ),
             layer_names=tuple(group.layer_names),
+            cache_kind=_group_cache_kind(group),
+            worker_kv_bytes_per_block=_group_worker_bytes_per_block(group),
         )
         for group in kv_cache_config.kv_cache_groups
     )
@@ -96,6 +140,7 @@ def build_offloading_config(
         blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
 
     worker_kv_bytes_per_block = 0
+    is_packed = False
     if kv_cache_config.num_blocks > 0:
         packed_tensors = tuple(
             is_kv_cache_tensor_packed(tensor)
@@ -179,4 +224,5 @@ def build_offloading_config(
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        packed_layout=is_packed,
     )
